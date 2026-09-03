@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- ВАЖНО: Этот тег отключает Referer, позволяя загружать аватарки с серверов TikTok без блокировки -->
+    <meta name="referrer" content="no-referrer">
+    <title>TIKTIMER</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=Bebas+Neue&family=Montserrat:wght@400;800&family=Comic+Neue:wght@700&family=Roboto:wght@700;900&family=Open+Sans:wght@700;800&family=Oswald:wght@700&family=Raleway:wght@800;900&family=Nunito:wght@800;900&family=Playfair+Display:wght@700;900&family=Caveat:wght@700&family=Rubik:wght@700;900&family=Pacifico&family=Yanone+Kaffeesatz:wght@700&family=Comfortaa:wght@700&family=Ruslan+Display&family=Kelly+Slab&family=Roboto+Slab:wght@700;900&family=Lobster&family=Alice&family=PT+Sans:wght@700&display=swap');
+        
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; overflow: hidden; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        
+        .drag-region { -webkit-app-region: drag; user-select: none; }
+        .no-drag { -webkit-app-region: no-drag; }
+
+        @keyframes shake {
+            0%, 100% { transform: translateX(-50%); }
+            20% { transform: translateX(calc(-50% - 10px)); }
+            40% { transform: translateX(calc(-50% + 10px)); }
+            60% { transform: translateX(calc(-50% - 10px)); }
+            80% { transform: translateX(calc(-50% + 10px)); }
+        }
+        .animate-shake { animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both; }
+
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in { animation: fadeInUp 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }
+        
+        @keyframes fadeInDownCentered {
+            from { opacity: 0; transform: translate(-50%, -30px); }
+            to { opacity: 1; transform: translate(-50%, 0); }
+        }
+        .animate-fade-in-down-centered { animation: fadeInDownCentered 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }
+
+        .tab-active { background: linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(168,85,247,0.2) 100%); border-right: 3px solid #818cf8; color: white; }
+        .tab-inactive { color: #94a3b8; }
+        .tab-inactive:hover { background: #1e293b; color: white; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        const { ipcRenderer } = require('electron');
+
+        const ColorPicker = ({ label, value, onChange }) => (
+            <div className="flex justify-between items-center bg-slate-950 p-3 rounded-xl border border-slate-700">
+                <span className="text-xs font-bold text-slate-400 uppercase">{label}</span>
+                <input type="color" value={value || '#ffffff'} onChange={onChange} className="w-8 h-8 rounded border-none bg-transparent cursor-pointer" />
+            </div>
+        );
+
+        const hexToRgba = (hex, alpha) => {
+            hex = hex || '#000000'; hex = hex.replace('#', '');
+            let r = parseInt(hex.substring(0, 2), 16) || 0; let g = parseInt(hex.substring(2, 4), 16) || 0; let b = parseInt(hex.substring(4, 6), 16) || 0;
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        };
+
+        const getStroke = (isThick, isEnabled, extraShadow = '') => {
+            if (isEnabled === false) return extraShadow;
+            const stroke = isThick 
+                ? '-0.04em -0.04em 0 #000, 0.04em -0.04em 0 #000, -0.04em 0.04em 0 #000, 0.04em 0.04em 0 #000, -0.04em 0 0 #000, 0.04em 0 0 #000, 0 -0.04em 0 #000, 0 0.04em 0 #000' 
+                : '-0.025em -0.025em 0 #000, 0.025em -0.025em 0 #000, -0.025em 0.025em 0 #000, 0.025em 0.025em 0 #000';
+            return extraShadow ? `${stroke}, ${extraShadow}` : stroke;
+        };
+
+        const supabaseUrl = 'https://lqjagftaeejdufwwvjwd.supabase.co';
+        const supabaseKey = 'sb_publishable_6-9IBhMX9CMVbIackZAJ9g_UUk5FDqx';
+        const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
+
+        const knownGiftsCache = new Set();
+        ipcRenderer.on('check-and-save-gift', async (e, gift) => {
+            if (!gift || !gift.gift_id || knownGiftsCache.has(gift.gift_id)) return;
+            try {
+                const { error } = await supabase.from('gift_library').upsert([{ gift_id: gift.gift_id, name: gift.name, icon: gift.icon, cost: gift.cost }], { onConflict: 'gift_id' });
+                if (!error) { knownGiftsCache.add(gift.gift_id); window.dispatchEvent(new CustomEvent('new-gift-saved', { detail: gift })); }
+            } catch (err) { }
+        });
+
+        const getGlobalVolume = () => { try { const vol = localStorage.getItem('marfaleyVolume') || localStorage.getItem('astralVolume'); return vol !== null ? parseFloat(vol) : 0.5; } catch(e) { return 0.5; } };
+
+        let sharedAudioCtx = null;
+        const getAudioCtx = () => { if (!sharedAudioCtx) sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (sharedAudioCtx.state === 'suspended') sharedAudioCtx.resume(); return sharedAudioCtx; };
+        
+        const playSuccessSound = () => { 
+            try { const ctx = getAudioCtx(); const osc = ctx.createOscillator(); const gain = ctx.createGain(); 
+                osc.type = 'sine'; osc.frequency.setValueAtTime(440, ctx.currentTime); osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.1); 
+                gain.gain.setValueAtTime(0.5 * getGlobalVolume(), ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5); 
+                osc.connect(gain); gain.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime + 0.5); 
+            } catch (e) {} 
+        };
+
+        const playErrorSound = () => { 
+            try { const ctx = getAudioCtx(); const osc = ctx.createOscillator(); const gain = ctx.createGain(); 
+                osc.type = 'square'; osc.frequency.setValueAtTime(150, ctx.currentTime); osc.frequency.exponentialRampToValueAtTime(100, ctx.currentTime + 0.2); 
+                gain.gain.setValueAtTime(0.5 * getGlobalVolume(), ctx.currentTime); gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4); 
+                osc.connect(gain); gain.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime + 0.4); 
+            } catch (e) {} 
+        };
+
+        ipcRenderer.on('play-success-sound', playSuccessSound);
+        ipcRenderer.on('play-error-sound', playErrorSound);
+
+        function GiftModal({ isOpen, onClose, onSelect }) {
+            const [gifts, setGifts] = useState([]);
+            const [search, setSearch] = useState('');
+            const [isLoading, setIsLoading] = useState(false);
+            
+            useEffect(() => {
+                if (!isOpen) return;
+                setIsLoading(true);
+                supabase.from('gift_library').select('*').then(({ data, error }) => { 
+                    setIsLoading(false);
+                    if (data && data.length > 0) {
+                        const grouped = data.reduce((acc, curr) => {
+                            const giftName = curr.name || 'Без названия';
+                            if (!acc[giftName]) { acc[giftName] = { ...curr, name: giftName, ids: [curr.gift_id] }; } 
+                            else if (!acc[giftName].ids.includes(curr.gift_id)) { acc[giftName].ids.push(curr.gift_id); }
+                            return acc;
+                        }, {});
+                        setGifts(Object.values(grouped).sort((a, b) => (a.cost || 0) - (b.cost || 0)));
+                    }
+                }).catch(() => setIsLoading(false));
+            }, [isOpen]);
+            
+            if (!isOpen) return null;
+            const filteredGifts = gifts.filter(g => (g.name || '').toLowerCase().includes(search.toLowerCase()));
+
+            return (
+                <div className="fixed inset-0 bg-slate-950/90 flex items-center justify-center p-6 z-[9999] backdrop-blur-sm no-drag">
+                    <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-4xl h-[85vh] flex flex-col shadow-2xl">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-2xl font-bold text-white">Библиотека подарков</h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-white transition text-xl"><i className="fa-solid fa-xmark"></i></button>
+                        </div>
+                        <input type="text" placeholder="Поиск подарка..." value={search} onChange={e => setSearch(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 mb-4 focus:border-indigo-500 text-white outline-none transition" />
+                        
+                        <div className="flex-1 overflow-y-auto grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-4 pr-2 custom-scrollbar">
+                            {isLoading ? (
+                                <div className="col-span-full text-center text-indigo-400 mt-10 animate-pulse">Загрузка...</div> 
+                            ) : (
+                                filteredGifts.map((g, idx) => (
+                                    <div key={`${g.name}-${idx}`} onClick={() => { onSelect(g); onClose(); setSearch(''); }} className="cursor-pointer bg-slate-800/50 p-4 rounded-xl hover:bg-slate-700 transition flex flex-col items-center group border border-transparent hover:border-indigo-500">
+                                        <img src={g.icon} alt={g.name} className="w-16 h-16 object-contain mb-3 group-hover:scale-110 transition drop-shadow-lg" />
+                                        <span className="text-sm text-center font-bold leading-tight text-slate-200">{g.name}</span>
+                                        <span className="text-xs text-indigo-400 mt-1 font-semibold">{g.cost || 0} монет</span>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function MainView() {
+            const [activeTab, setActiveTab] = useState('connect');
+            const [status, setStatus] = useState({ tt: { text: 'Ожидание', isActive: false, avatar: null, nickname: null }, da: 'Ожидание', dp: 'Ожидание', dx: 'Ожидание' });
+            const [isRunning, setIsRunning] = useState(false);
+            const [modal, setModal] = useState({ isOpen: false, key: null });
+            const [expandedRoulette, setExpandedRoulette] = useState(null);
+            
+            const [mpState, setMpState] = useState({ isConnected: false, roomId: null, users: [], error: null });
+            const [mpRoomInput, setMpRoomInput] = useState('');
+
+            const [uptimeStartTime, setUptimeStartTime] = useState(() => {
+                const now = new Date();
+                now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+                return now.toISOString().slice(0, 16);
+            });
+            const [uptimeRouletteId, setUptimeRouletteId] = useState('');
+
+            const defConfig = {
+                username: '', daClientId: '', dpApiKey: '', dxToken: '', 
+                initialTime: 60, bonusEnabled: true, bonusMin: 60, bonusMax: 300,
+                isFreezeEnabled: false, giftFreeze: null, freezeDuration: 60, freezeDonationAmount: '',
+                giftUnfreeze: null, unfreezeDuration: 60, unfreezeDonationAmount: '',
+                isReverseEnabled: false, giftReverse: null, reverseDonationAmount: '',
+                isRuinerEnabled: false, giftRuiner: null, ruinerDonationAmount: '', ruinerDuration: 60, ruinerMinTime: 60, ruinerMaxTime: 300,
+                giftSave: null, saveDonationAmount: '',
+                isPenaltyEnabled: true, penalties: [],
+                isSetTimeEnabled: true, giftSetTime: null, setTimeValue: 300, setTimeDonationAmount: '',
+                isResetEnabled: true, giftReset: null, resetDonationAmount: '',
+                isMultiplierGiftEnabled: true, multiplierValue: 2, multiplierDuration: 60, giftMultiplier: null, multiplierDonationAmount: '',
+                isDebuffGiftEnabled: false, debuffValue: 2, debuffDuration: 60, giftDebuff: null, debuffDonationAmount: '',
+                likesEnabled: true, likeThreshold: 100, likeTime: 10, 
+                subsEnabled: true, subTime: 180, customGifts: [],
+                roulettes: [
+                    { id: 'default-1', name: 'Стандартная рулетка', triggerType: 'both', triggerGifts: [], donationAmount: '', likesThreshold: 100000, addsCost: false, isMain: true, slots: [] }
+                ],
+                styles: { 
+                    fontFamily: 'Inter, sans-serif', timerColor: '#ffffff', timerGlow: 0.4, enableStroke: true,
+                    buffColor: '#34d399', debuffColor: '#f43f5e', floatPlusColor: '#34d399', floatMinusColor: '#f87171',
+                    buffCardBg: '#10b981', debuffCardBg: '#e11d48'
+                }
+            };
+            
+            const [volume, setVolume] = useState(getGlobalVolume());
+
+            const [savedConfig, setSavedConfig] = useState(() => {
+                const saved = localStorage.getItem('marfaleyConfig') || localStorage.getItem('astralConfig'); 
+                let parsed = saved ? JSON.parse(saved) : {};
+                
+                if (!parsed.roulettes && (parsed.rouletteSlots || parsed.giftRoulette || parsed.likesRouletteEnabled)) {
+                    parsed.roulettes = [{
+                        id: 'default-1',
+                        name: 'Стандартная рулетка',
+                        triggerType: parsed.likesRouletteEnabled ? (parsed.giftRoulette ? 'both' : 'like') : 'gift',
+                        triggerGifts: parsed.giftRoulette ? [parsed.giftRoulette] : [],
+                        donationAmount: parsed.rouletteDonationAmount || '',
+                        likesThreshold: parsed.likesRouletteThreshold || 100000,
+                        addsCost: parsed.rouletteGiftAddsCost || false,
+                        isMain: true,
+                        slots: parsed.rouletteSlots || []
+                    }];
+                }
+
+                if (!parsed.penalties && parsed.isPenaltyEnabled !== undefined) {
+                    parsed.penalties = [{
+                        id: 'default-penalty',
+                        gift: parsed.giftPenalty || null,
+                        donationAmount: parsed.penaltyDonationAmount || '',
+                        penaltyAmount: parsed.penaltyAmount || 600,
+                        penaltyThreshold: parsed.penaltyThreshold || 300,
+                        isEnabled: true
+                    }];
+                }
+                
+                if (parsed.roulettes && parsed.roulettes.length > 0) {
+                    const hasMain = parsed.roulettes.some(r => r.isMain);
+                    if (!hasMain) parsed.roulettes[0].isMain = true;
+                }
+                
+                return { ...defConfig, ...parsed, styles: { ...defConfig.styles, ...(parsed.styles || {}) } };
+            });
+
+            const [config, setConfig] = useState(savedConfig);
+            const hasChanges = JSON.stringify(savedConfig) !== JSON.stringify(config);
+
+            const formatPayload = (data) => ({
+                ...data,
+                giftSetTimeIds: data.giftSetTime?.ids || [],
+                giftResetIds: data.giftReset?.ids || [], 
+                giftMultiplierIds: data.giftMultiplier?.ids || [], giftDebuffIds: data.giftDebuff?.ids || [],
+                giftFreezeIds: data.giftFreeze?.ids || [], giftUnfreezeIds: data.giftUnfreeze?.ids || [],
+                giftReverseIds: data.giftReverse?.ids || [],
+                giftRuinerIds: data.giftRuiner?.ids || [], giftSaveIds: data.giftSave?.ids || [],
+                penalties: (data.penalties || []).map(p => ({
+                    ids: p.gift?.ids || [],
+                    donationAmount: p.donationAmount,
+                    penaltyAmount: p.penaltyAmount,
+                    penaltyThreshold: p.penaltyThreshold,
+                    isEnabled: p.isEnabled
+                })),
+                customTriggers: data.customGifts.filter(cg => cg.gift || cg.donationAmount).map(cg => ({ 
+                    ids: cg.gift?.ids || [], 
+                    donationAmount: cg.donationAmount,
+                    type: cg.type, 
+                    value: cg.value, 
+                    isEnabled: cg.isEnabled 
+                })),
+                roulettes: (data.roulettes || []).map(r => ({
+                    ...r,
+                    triggerGiftIds: (r.triggerGifts || []).flatMap(g => g.ids || [])
+                }))
+            });
+
+            useEffect(() => { ipcRenderer.send('update-settings', formatPayload(config)); }, [config]);
+
+            useEffect(() => {
+                ipcRenderer.send('get-initial-status');
+                const handleTtStatus = (e, data) => setStatus(p => ({...p, tt: data})); 
+                const handleDaStatus = (e, t) => setStatus(p => ({...p, da: t}));
+                const handleDpStatus = (e, t) => setStatus(p => ({...p, dp: t})); const handleDxStatus = (e, t) => setStatus(p => ({...p, dx: t}));
+                
+                // ОПТИМИЗАЦИЯ: Предотвращаем лишние ререндеры если статус не изменился
+                const handleTimerTick = (e, s) => {
+                    setIsRunning(prev => prev !== s.isRunning ? s.isRunning : prev);
+                };
+                
+                const handleMpStatus = (e, data) => setMpState(data);
+
+                ipcRenderer.on('tiktok-status', handleTtStatus); ipcRenderer.on('da-status', handleDaStatus);
+                ipcRenderer.on('dp-status', handleDpStatus); ipcRenderer.on('dx-status', handleDxStatus);
+                ipcRenderer.on('timer-tick', handleTimerTick);
+                ipcRenderer.on('mp-status', handleMpStatus);
+
+                return () => {
+                    ipcRenderer.removeListener('tiktok-status', handleTtStatus); ipcRenderer.removeListener('da-status', handleDaStatus);
+                    ipcRenderer.removeListener('dp-status', handleDpStatus); ipcRenderer.removeListener('dx-status', handleDxStatus);
+                    ipcRenderer.removeListener('timer-tick', handleTimerTick);
+                    ipcRenderer.removeListener('mp-status', handleMpStatus);
+                };
+            }, [activeTab]);
+
+            const triggerShake = () => { const bar = document.getElementById('save-bar'); if(bar) { bar.classList.remove('animate-shake'); void bar.offsetWidth; bar.classList.add('animate-shake'); } };
+            const handleTabClick = (id) => { if (hasChanges) { triggerShake(); return; } setActiveTab(id); };
+            const handleSave = () => { setSavedConfig(config); localStorage.setItem('marfaleyConfig', JSON.stringify(config)); ipcRenderer.send('update-settings', formatPayload(config)); };
+            const handleCancel = () => { setConfig(savedConfig); };
+
+            const updateRoulette = (rId, field, value) => {
+                setConfig(prev => ({ ...prev, roulettes: prev.roulettes.map(r => r.id === rId ? { ...r, [field]: value } : r) }));
+            };
+
+            const renderTrigger = (gift, modalKey, amountKey, colorHover, textClass = "text-slate-400", placeholderText = "Донат") => (
+                <div className="flex flex-col xl:flex-row xl:items-center justify-between bg-slate-950 p-3 rounded-xl border border-slate-700 gap-3 mb-2">
+                    <div className="flex items-center gap-3 overflow-hidden">
+                        {gift ? <div className="flex items-center gap-2 overflow-hidden"><img src={gift.icon} className="w-6 h-6 shrink-0 object-contain"/> <span className="font-bold text-xs text-slate-200 truncate max-w-[150px]">{gift.name}</span></div> : <span className="text-slate-500 text-xs truncate">Подарок не выбран</span>}
+                        <button onClick={() => setModal({ isOpen: true, key: modalKey })} className="bg-slate-800 hover:bg-slate-700 text-[10px] font-bold px-2 py-1 rounded transition text-white shrink-0 shadow-md">Выбрать</button>
+                    </div>
+                    <div className={`flex items-center gap-2 shrink-0 bg-slate-900 px-2 py-1.5 rounded-lg border border-slate-800 transition-colors ${colorHover}`}>
+                        <span className={`text-[10px] font-bold uppercase ${textClass}`}><i className="fa-solid fa-ruble-sign mr-1"></i>{placeholderText}:</span>
+                        <input type="number" value={config[amountKey] || ''} onChange={e => setConfig({...config, [amountKey]: e.target.value === '' ? '' : Number(e.target.value)})} className="w-16 bg-transparent text-xs text-white font-bold outline-none text-right" placeholder="0" title="Точная сумма в рублях" />
+                    </div>
+                </div>
+            );
+
+            const TabBtn = ({ id, icon, text }) => (
+                <button onClick={() => handleTabClick(id)} className={`w-full flex items-center gap-3 px-6 py-4 font-semibold transition ${activeTab === id ? 'tab-active' : 'tab-inactive'}`}><i className={icon + " w-5 text-center text-lg"}></i> {text}</button>
+            );
+
+            const fontOptions = [
+                { label: 'Inter (Современный)', value: 'Inter, sans-serif' }, { label: 'Bebas Neue (Компактный)', value: '"Bebas Neue", sans-serif' },
+                { label: 'Montserrat (Жирный)', value: '"Montserrat", sans-serif' }, { label: 'Comic Neue (Веселый)', value: '"Comic Neue", cursive' },
+                { label: 'Roboto (Классика)', value: '"Roboto", sans-serif' }, { label: 'Open Sans (Читаемый)', value: '"Open Sans", sans-serif' },
+                { label: 'Oswald (Вытянутый)', value: '"Oswald", sans-serif' }, { label: 'Raleway (Элегантный)', value: '"Raleway", sans-serif' },
+                { label: 'Nunito (Мягкий)', value: '"Nunito", sans-serif' }, { label: 'Playfair Display (С засечками)', value: '"Playfair Display", serif' },
+                { label: 'Caveat (Рукописный)', value: '"Caveat", cursive' }, { label: 'Rubik (Квадратный)', value: '"Rubik", sans-serif' },
+                { label: 'Pacifico (Ретро)', value: '"Pacifico", cursive' }, { label: 'Yanone Kaffeesatz (Узкий)', value: '"Yanone Kaffeesatz", sans-serif' },
+                { label: 'Comfortaa (Округлый)', value: '"Comfortaa", sans-serif' }, { label: 'Ruslan Display (Славянский)', value: '"Ruslan Display", cursive' },
+                { label: 'Kelly Slab (Брутальный)', value: '"Kelly Slab", cursive' }, { label: 'Roboto Slab (Строгий)', value: '"Roboto Slab", serif' },
+                { label: 'Lobster (Праздничный)', value: '"Lobster", cursive' }, { label: 'Alice (Книжный)', value: '"Alice", serif' },
+                { label: 'PT Sans (Универсальный)', value: '"PT Sans", sans-serif' }, { label: 'Impact (Мемный)', value: 'Impact, sans-serif' }
+            ];
+
+            return (
+                <div className="flex h-screen bg-slate-950 font-sans text-slate-200">
+                    <div className="w-72 bg-slate-900 border-r border-slate-800 flex flex-col z-20 shadow-2xl relative shrink-0">
+                        <div className="p-6 border-b border-slate-800 flex items-center gap-3 drag-region">
+                            <span className="text-3xl drop-shadow-md select-none">⚡</span>
+                            <h1 className="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-purple-400 tracking-tight">TIKTIMER</h1>
+                        </div>
+                        <nav className="flex-1 py-4 flex flex-col gap-1 no-drag">
+                            <TabBtn id="connect" icon="fa-solid fa-wifi" text="Подключения" />
+                            <TabBtn id="multiplayer" icon="fa-solid fa-users" text="Мультиплеер" />
+                            <TabBtn id="timer" icon="fa-solid fa-clock" text="Лайки, Время, Подписки" />
+                            <TabBtn id="buffs" icon="fa-solid fa-bolt" text="Триггеры" />
+                            <TabBtn id="roulette" icon="fa-solid fa-dice" text="Рулетки" />
+                            <TabBtn id="style" icon="fa-solid fa-palette" text="Оформление" />
+                        </nav>
+                        <div className="p-4 border-t border-slate-800 no-drag space-y-3">
+                            <div className="bg-slate-800/50 p-3 rounded-xl border border-slate-700">
+                                <div className="flex justify-between items-center mb-2">
+                                    <span className="text-xs font-bold text-slate-400 uppercase"><i className="fa-solid fa-volume-high mr-1 text-indigo-400"></i> Звуки</span>
+                                    <span className="text-xs font-bold text-white bg-slate-900 px-2 py-0.5 rounded border border-slate-700">{Math.round(volume * 100)}%</span>
+                                </div>
+                                <input type="range" min="0" max="1" step="0.01" value={volume} onChange={(e) => { const v = parseFloat(e.target.value); setVolume(v); localStorage.setItem('marfaleyVolume', v.toString()); }} className="w-full accent-indigo-500 h-2 bg-slate-900 rounded-lg appearance-none cursor-pointer" />
+                            </div>
+
+                            {isRunning ? (
+                                <button onClick={() => ipcRenderer.send('stop-timer')} className="w-full bg-rose-600/20 text-rose-500 hover:bg-rose-600 hover:text-white border border-rose-50 py-3 rounded-xl font-bold transition flex items-center justify-center gap-2"><i className="fa-solid fa-stop"></i> Стоп</button>
+                            ) : (
+                                <button onClick={() => { if(hasChanges) { triggerShake(); return; } ipcRenderer.send('start-timer', formatPayload(config)); }} className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white py-3 rounded-xl font-bold shadow-[0_0_15px_rgba(99,102,241,0.4)] transition flex items-center justify-center gap-2"><i className="fa-solid fa-play"></i> ЗАПУСК</button>
+                            )}
+                            
+                            <div className="grid grid-cols-2 gap-2">
+                                <button onClick={() => ipcRenderer.send('open-timer-window')} className="bg-slate-800 hover:bg-slate-700 py-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5"><i className="fa-solid fa-clock text-indigo-400"></i> Таймер</button>
+                                <button onClick={() => ipcRenderer.send('open-roulette-window')} className="bg-slate-800 hover:bg-slate-700 py-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5"><i className="fa-solid fa-dice text-purple-400"></i> Рулетка</button>
+                                <button onClick={() => ipcRenderer.send('open-remote')} className="col-span-2 bg-slate-800 hover:bg-slate-700 py-2 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5"><i className="fa-solid fa-gamepad text-emerald-400"></i> Пульт</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto p-8 relative no-drag bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-slate-950 pb-32">
+                        <div className="max-w-[1200px] mx-auto space-y-6">
+                            
+                            {}
+                            {activeTab === 'connect' && (
+                                <div className="space-y-4 animate-fade-in">
+                                    <h2 className="text-3xl font-black text-white mb-6">Подключения</h2>
+                                    
+                                    <div className="flex flex-col gap-4">
+                                        <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl flex flex-col md:flex-row items-center gap-4 transition-all hover:border-cyan-500/30">
+                                            <div className="flex items-center gap-4 w-full md:w-1/4 shrink-0">
+                                                <div className="w-12 h-12 rounded-full bg-cyan-500/10 flex items-center justify-center border border-cyan-500/20 shrink-0 overflow-hidden">
+                                                    {status.tt.avatar && !status.tt.avatar.includes('1055823.png') ? (
+                                                        <img 
+                                                            src={status.tt.avatar} 
+                                                            alt="TikTok" 
+                                                            className="w-full h-full object-cover" 
+                                                            onError={(e) => { e.target.onerror = null; e.target.src = 'https://cdn-icons-png.flaticon.com/512/1055/1055823.png'; }}
+                                                        />
+                                                    ) : (
+                                                        <i className="fa-brands fa-tiktok text-cyan-400 text-2xl"></i>
+                                                    )}
+                                                </div>
+                                                <div className="flex flex-col overflow-hidden">
+                                                    <h3 className="text-lg font-bold text-white leading-tight truncate" title={status.tt.nickname}>
+                                                        {(status.tt.nickname && status.tt.nickname !== 'Стример') ? status.tt.nickname : (config.username || 'TikTok Live')}
+                                                    </h3>
+                                                    <span className={`text-[11px] font-bold truncate ${status.tt.isActive ? 'text-emerald-400' : 'text-slate-500'}`}>{status.tt.text}</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex-1 w-full flex items-center">
+                                                {!status.tt.isActive && (
+                                                    <div className="flex flex-col xl:flex-row items-start xl:items-center gap-3 w-full">
+                                                        <input type="text" value={config.username} onChange={e => setConfig({...config, username: e.target.value})} placeholder="@username" className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:border-cyan-500 transition text-sm font-medium text-white shadow-inner" />
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="w-full md:w-56 shrink-0">
+                                                <button onClick={() => { status.tt.isActive ? ipcRenderer.send('disconnect-tiktok') : ipcRenderer.send('connect-tiktok', { username: config.username }) }} 
+                                                    className={`w-full ${status.tt.isActive ? 'bg-rose-600 hover:bg-rose-500' : 'bg-cyan-600 hover:bg-cyan-500'} rounded-xl font-bold text-white transition py-3 text-sm shadow-lg`}>
+                                                    {status.tt.isActive ? 'Отключить' : 'Подключить'}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl flex flex-col md:flex-row items-center gap-4 transition-all hover:border-orange-500/30">
+                                            <div className="flex items-center gap-4 w-full md:w-1/4 shrink-0">
+                                                <div className="w-12 h-12 rounded-full bg-orange-500/10 flex items-center justify-center border border-orange-500/20 shrink-0">
+                                                    <i className="fa-solid fa-shield-halved text-orange-400 text-xl"></i>
+                                                </div>
+                                                <div className="flex flex-col overflow-hidden">
+                                                    <h3 className="text-lg font-bold text-white leading-tight truncate">DonationAlerts</h3>
+                                                    <span className={`text-[11px] font-bold truncate ${status.da.includes('Успешно подключено') ? 'text-emerald-400' : 'text-slate-500'}`}>{status.da}</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex-1 w-full flex flex-col justify-center">
+                                                {!status.da.includes('Успешно подключено') && (
+                                                    <div className="flex flex-col xl:flex-row items-start xl:items-center gap-3 w-full">
+                                                        <div className="bg-slate-800/50 border border-slate-700 p-2 rounded-lg text-[11px] text-slate-300 leading-tight shrink-0 whitespace-nowrap">
+                                                            URI: <code className="bg-black/50 px-1 py-0.5 rounded text-orange-300">http://localhost/da-callback</code>
+                                                        </div>
+                                                        <input type="text" value={config.daClientId} onChange={e => setConfig({...config, daClientId: e.target.value})} placeholder="App ID (Client ID)" className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:border-orange-500 transition text-sm font-medium text-white shadow-inner" />
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="w-full md:w-56 shrink-0">
+                                                <button onClick={() => { status.da.includes('Успешно подключено') ? ipcRenderer.send('disconnect-da') : ipcRenderer.send('connect-da', { clientId: config.daClientId }) }} 
+                                                    className={`w-full ${status.da.includes('Успешно подключено') ? 'bg-rose-600 hover:bg-rose-500' : 'bg-orange-600 hover:bg-orange-500'} rounded-xl font-bold text-white transition py-3 text-sm shadow-lg`}>
+                                                    {status.da.includes('Успешно подключено') ? 'Отключить' : 'Авторизоваться'}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl flex flex-col md:flex-row items-center gap-4 transition-all hover:border-purple-500/30">
+                                            <div className="flex items-center gap-4 w-full md:w-1/4 shrink-0">
+                                                <div className="w-12 h-12 rounded-full bg-purple-500/10 flex items-center justify-center border border-purple-500/20 shrink-0">
+                                                    <i className="fa-solid fa-bolt text-purple-400 text-xl"></i>
+                                                </div>
+                                                <div className="flex flex-col overflow-hidden">
+                                                    <h3 className="text-lg font-bold text-white leading-tight truncate">DonateX.gg</h3>
+                                                    <span className={`text-[11px] font-bold truncate ${status.dx.includes('Успешно подключено') ? 'text-emerald-400' : 'text-slate-500'}`}>{status.dx}</span>
+                                                </div>
+                                            </div>
+                                            <div className="flex-1 w-full flex items-center">
+                                                {!status.dx.includes('Успешно подключено') && (
+                                                    <input type="text" value={config.dxToken} onChange={e => setConfig({...config, dxToken: e.target.value})} placeholder="External Token (из кабинета: Настройки -> Api)" className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:border-purple-500 transition text-sm font-medium text-white shadow-inner" />
+                                                )}
+                                            </div>
+                                            <div className="w-full md:w-56 shrink-0">
+                                                <button onClick={() => { status.dx.includes('Успешно подключено') ? ipcRenderer.send('disconnect-dx') : ipcRenderer.send('connect-dx', config.dxToken) }} 
+                                                    className={`w-full ${status.dx.includes('Успешно подключено') ? 'bg-rose-600 hover:bg-rose-500' : 'bg-purple-600 hover:bg-purple-500'} rounded-xl font-bold text-white transition py-3 text-sm shadow-lg`}>
+                                                    {status.dx.includes('Успешно подключено') ? 'Отключить' : 'Подключить'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* ВИДЖЕТ: ВРЕМЯ СТРИМА И ЛАЙКИ */}
+                                    <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl mt-8">
+                                        <div className="flex items-center gap-3 mb-6">
+                                            <i className="fa-solid fa-chart-line text-emerald-400 text-2xl"></i>
+                                            <h3 className="text-2xl font-bold text-white">Виджет: Время стрима и Лайки</h3>
+                                        </div>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                            <div>
+                                                <label className="text-xs text-slate-400 font-bold block mb-2 uppercase tracking-wider">Начало стрима (Дата и Время)</label>
+                                                <input type="datetime-local" value={uptimeStartTime} onChange={e => setUptimeStartTime(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:border-emerald-500 transition text-sm font-medium text-white shadow-inner" />
+                                            </div>
+                                            <div>
+                                                <label className="text-xs text-slate-400 font-bold block mb-2 uppercase tracking-wider">Отслеживать рулетку (за лайки)</label>
+                                                <select value={uptimeRouletteId} onChange={e => setUptimeRouletteId(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 outline-none focus:border-emerald-500 transition text-sm font-medium text-white shadow-inner">
+                                                    <option value="">Не отслеживать (Скрыть блок)</option>
+                                                    {(config.roulettes || []).filter(r => r.triggerType === 'like' || r.triggerType === 'both').map(r => (
+                                                        <option key={r.id} value={r.id}>{r.name}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <button onClick={() => ipcRenderer.send('open-uptime-window', { startTime: uptimeStartTime, rouletteId: uptimeRouletteId })} className="w-full bg-emerald-600 hover:bg-emerald-500 rounded-xl font-bold text-white transition py-3 text-sm shadow-lg mt-6 flex items-center justify-center gap-2">
+                                            <i className="fa-solid fa-arrow-up-right-from-square"></i> Открыть виджет статы
+                                        </button>
+                                    </div>
+                                    
+                                </div>
+                            )}
+
+                            {}
+                            {activeTab === 'multiplayer' && (
+                                <div className="space-y-6 animate-fade-in">
+                                    <h2 className="text-3xl font-black text-white mb-6">Мультиплеер</h2>
+                                    
+                                    <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl flex flex-col gap-6">
+                                        
+                                        {mpState.error && (
+                                            <div className="bg-rose-500/20 border border-rose-500/50 text-rose-400 p-4 rounded-xl font-bold flex items-center gap-3">
+                                                <i className="fa-solid fa-triangle-exclamation text-xl"></i>
+                                                {mpState.error}
+                                            </div>
+                                        )}
+
+                                        {!mpState.isConnected ? (
+                                            <div className="flex flex-col gap-4">
+                                                <div>
+                                                    <label className="text-xs font-bold text-slate-400 mb-2 block uppercase">ID Комнаты (или название)</label>
+                                                    <input type="text" value={mpRoomInput} onChange={e => setMpRoomInput(e.target.value)} placeholder="Например: YanaCist1" className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-white font-bold outline-none focus:border-indigo-500 transition shadow-inner" />
+                                                </div>
+                                                <button 
+                                                    onClick={() => { if(mpRoomInput.trim()) ipcRenderer.send('mp-join', { roomId: mpRoomInput.trim() }) }} 
+                                                    className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition shadow-lg flex items-center justify-center gap-2"
+                                                >
+                                                    <i className="fa-solid fa-right-to-bracket"></i> Войти в комнату
+                                                </button>
+                                                <p className="text-xs text-slate-500 text-center mt-2">
+                                                    Ваш никнейм (<span className="text-indigo-400 font-bold">{config.username || 'Не указан в настройках'}</span>) будет использован автоматически.<br/> 
+                                                    Обязательное условие: <span className="text-rose-400 font-bold">Стрим должен быть запущен!</span>
+                                                </p>
+                                            </div>
+                                        ) : (
+                                            <div className="flex flex-col gap-6">
+                                                <div className="flex justify-between items-center bg-slate-950 p-4 rounded-xl border border-emerald-500/30 shadow-inner">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.8)]"></div>
+                                                        <span className="text-emerald-400 font-bold uppercase tracking-widest text-sm">Подключено к: {mpState.roomId}</span>
+                                                    </div>
+                                                    <button 
+                                                        onClick={() => ipcRenderer.send('mp-leave')} 
+                                                        className="bg-rose-600/20 hover:bg-rose-600 text-rose-400 hover:text-white px-4 py-2 rounded-lg font-bold transition flex items-center gap-2 border border-rose-500/30 text-xs"
+                                                    >
+                                                        <i className="fa-solid fa-right-from-bracket"></i> Покинуть комнату
+                                                    </button>
+                                                </div>
+
+                                                <div>
+                                                    <h3 className="text-sm font-bold text-slate-400 mb-3 uppercase tracking-wider">Игроки в комнате ({mpState.users.length}):</h3>
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                        {mpState.users.map((u, i) => {
+                                                            const isMe = u.username === config.username;
+                                                            return (
+                                                                <div key={i} className={`bg-slate-950 border ${isMe ? 'border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.1)]' : 'border-slate-800'} p-3 rounded-xl flex items-center gap-3`}>
+                                                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center border overflow-hidden shrink-0 ${isMe ? 'border-indigo-500/50 shadow-[0_0_10px_rgba(99,102,241,0.3)]' : 'border-slate-700'}`}>
+                                                                        {u.avatar ? (
+                                                                            <img 
+                                                                                src={u.avatar} 
+                                                                                alt={u.nickname || u.username} 
+                                                                                className="w-full h-full object-cover" 
+                                                                                onError={(e) => { e.target.onerror = null; e.target.src = 'https://cdn-icons-png.flaticon.com/512/1055/1055823.png'; }}
+                                                                            />
+                                                                        ) : (
+                                                                            <div className={`w-full h-full flex items-center justify-center ${isMe ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-800 text-slate-400'}`}>
+                                                                                <i className="fa-solid fa-user"></i>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                    <div className="flex flex-col overflow-hidden">
+                                                                        <span className="font-bold text-white truncate" title={u.username}>
+                                                                            {u.nickname || u.username} {isMe ? '(Вы)' : ''}
+                                                                        </span>
+                                                                        <span className={`text-[10px] font-bold uppercase ${u.isStreamActive ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                                                            {u.isStreamActive ? 'Стрим онлайн' : 'Стрим оффлайн'}
+                                                                        </span>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {}
+                            {activeTab === 'timer' && (
+                                <div className="space-y-6 animate-fade-in">
+                                    <h2 className="text-3xl font-black text-white mb-8">Таймер и Бонусы</h2>
+                                    <div className="grid grid-cols-2 gap-6">
+                                        <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl">
+                                            <h3 className="font-bold text-slate-300 mb-4">Начальное время (мин)</h3>
+                                            <input type="number" value={config.initialTime} onChange={e => setConfig({...config, initialTime: Number(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-2xl font-black text-center outline-none focus:border-indigo-500 transition text-white" />
+                                        </div>
+                                        <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl flex flex-col justify-center gap-4">
+                                            
+                                            <div className={`flex justify-between items-center bg-slate-800/50 p-3 rounded-xl border ${config.likesEnabled ? 'border-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.1)]' : 'border-slate-700'} transition-all`}>
+                                                <div className="flex items-center gap-3">
+                                                    <div onClick={() => setConfig({...config, likesEnabled: !config.likesEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer transition-colors ${config.likesEnabled ? 'bg-emerald-500' : 'bg-slate-700'} `}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.likesEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                                    <span className={`text-sm font-semibold ${config.likesEnabled ? 'text-white' : 'text-slate-400'}`}>За <input type="number" value={config.likeThreshold} onChange={e => setConfig({...config, likeThreshold: Number(e.target.value)})} className={`w-16 bg-slate-950 text-center rounded mx-2 py-1 outline-none border ${config.likesEnabled ? 'border-emerald-500/30' : 'border-slate-600'}`} disabled={!config.likesEnabled} /> лайков</span>
+                                                </div>
+                                                <div className={`flex items-center ${config.likesEnabled ? 'opacity-100' : 'opacity-30'}`}>
+                                                    <span className="text-emerald-400 font-bold mr-1"></span>
+                                                    <input type="number" value={config.likeTime} onChange={e => setConfig({...config, likeTime: Number(e.target.value)})} className="w-16 bg-slate-950 text-center rounded py-1 text-emerald-400 font-bold outline-none border border-slate-600" disabled={!config.likesEnabled} />
+                                                    <span className="text-emerald-400 font-bold ml-1">сек</span>
+                                                </div>
+                                            </div>
+                                            
+                                            <div className={`flex justify-between items-center bg-slate-800/50 p-3 rounded-xl border ${config.subsEnabled ? 'border-emerald-500/50 shadow-[0_0_15px_rgba(16,185,129,0.1)]' : 'border-slate-700'} transition-all`}>
+                                                <div className="flex items-center gap-3">
+                                                    <div onClick={() => setConfig({...config, subsEnabled: !config.subsEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer transition-colors ${config.subsEnabled ? 'bg-emerald-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.subsEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                                    <span className={`text-sm font-semibold ${config.subsEnabled ? 'text-white' : 'text-slate-400'}`}>Новый Подписчик</span>
+                                                </div>
+                                                <div className={`flex items-center ${config.subsEnabled ? 'opacity-100' : 'opacity-30'}`}>
+                                                    <span className="text-emerald-400 font-bold mr-1"></span>
+                                                    <input type="number" value={config.subTime} onChange={e => setConfig({...config, subTime: Number(e.target.value)})} className="w-16 bg-slate-950 text-center rounded py-1 text-emerald-400 font-bold outline-none border border-slate-600" disabled={!config.subsEnabled} />
+                                                    <span className="text-emerald-400 font-bold ml-1">сек</span>
+                                                </div>
+                                            </div>
+
+                                        </div>
+                                    </div>
+                                    <div className="bg-slate-900 border border-indigo-500/30 p-6 rounded-2xl shadow-[0_0_30px_rgba(99,102,241,0.1)] relative overflow-hidden">
+                                        <div className="absolute top-0 right-0 p-6 opacity-10 pointer-events-none"><i className="fa-solid fa-gift text-9xl text-indigo-500"></i></div>
+                                        <div className="flex items-center gap-4 mb-6 relative z-10">
+                                            <div onClick={() => setConfig({...config, bonusEnabled: !config.bonusEnabled})} className={`w-14 h-7 rounded-full relative cursor-pointer transition-colors ${config.bonusEnabled ? 'bg-indigo-500' : 'bg-slate-700'} `}><div className={`w-5 h-5 rounded-full bg-white absolute top-1 transition-transform ${config.bonusEnabled ? 'translate-x-8' : 'translate-x-1'}`}></div></div>
+                                            <div><h3 className="text-xl font-bold text-white">Бонусное время при нуле</h3><p className="text-sm text-slate-400">как таймер заканчивается запускается рулетка с доп временем </p></div>
+                                        </div>
+                                        <div className={`grid grid-cols-2 gap-4 transition-opacity ${config.bonusEnabled ? 'opacity-100' : 'opacity-30 pointer-events-none'}`}>
+                                            <div><label className="text-xs text-slate-400 font-bold uppercase mb-1 block">Минимум (сек)</label><input type="number" value={config.bonusMin} onChange={e => setConfig({...config, bonusMin: Number(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 font-bold text-indigo-300 outline-none focus:border-indigo-500" /></div>
+                                            <div><label className="text-xs text-slate-400 font-bold uppercase mb-1 block">Максимум (сек)</label><input type="number" value={config.bonusMax} onChange={e => setConfig({...config, bonusMax: Number(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 font-bold text-indigo-300 outline-none focus:border-indigo-500" /></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {}
+                            {activeTab === 'buffs' && (
+                                <div className="space-y-6 animate-fade-in">
+                                    <div className="flex items-center justify-between mb-8">
+                                        <h2 className="text-3xl font-black text-white">Баффы, Штрафы и Заморозка</h2>
+                                        <span className="text-[11px] font-bold text-slate-400 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 shadow-sm"><i className="fa-solid fa-triangle-exclamation text-rose-400 mr-1"></i> Осторожно: суммы донатов не должны повторяться</span>
+                                    </div>
+
+                                    <div className={`bg-gradient-to-br from-orange-900/20 to-slate-900 border ${config.isRuinerEnabled ? 'border-orange-500/50 shadow-[0_0_20px_rgba(249,115,22,0.1)]' : 'border-slate-800'} p-6 rounded-2xl transition`}>
+                                        <div className="flex justify-between items-center mb-6">
+                                            <div className="flex items-center gap-3">
+                                                <i className="fa-solid fa-burst text-orange-500 text-2xl"></i>
+                                                <div>
+                                                    <h3 className="font-bold text-white text-lg leading-tight">Руинер и Сейв</h3>
+                                                    <p className="text-xs text-slate-400">Включает отсчет, при нуле - прокрут рулетки с добавлением времени</p>
+                                                </div>
+                                            </div>
+                                            <div onClick={() => setConfig({...config, isRuinerEnabled: !config.isRuinerEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer ${config.isRuinerEnabled ? 'bg-orange-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.isRuinerEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                        </div>
+                                        <div className={!config.isRuinerEnabled ? 'opacity-30 pointer-events-none' : ''}>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                                <div>
+                                                    <label className="text-xs text-rose-400 font-bold block mb-2 uppercase tracking-wider">Подарок РУИНЕРА</label>
+                                                    {renderTrigger(config.giftRuiner, 'giftRuiner', 'ruinerDonationAmount', 'focus-within:border-rose-500', 'text-rose-500')}
+                                                    <div className="flex items-center justify-between gap-2 mt-2 bg-slate-950 p-2 rounded-xl border border-slate-800">
+                                                        <label className="text-xs text-slate-400 font-bold w-full">Время на раздумье (до прокрута):</label>
+                                                        <input type="number" value={config.ruinerDuration} onChange={e => setConfig({...config, ruinerDuration: Number(e.target.value)})} className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-white font-bold outline-none text-center" />
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <label className="text-xs text-amber-400 font-bold block mb-2 uppercase tracking-wider">Подарок СЕЙВА</label>
+                                                    {renderTrigger(config.giftSave, 'giftSave', 'saveDonationAmount', 'focus-within:border-amber-500', 'text-amber-500')}
+                                                    <div className="flex items-center justify-between gap-2 mt-2 bg-slate-950 p-2 rounded-xl border border-slate-800">
+                                                        <label className="text-xs text-slate-400 font-bold w-full">Диапазон времени при проигрыше:</label>
+                                                        <div className="flex gap-1 items-center shrink-0">
+                                                            <input type="number" value={config.ruinerMinTime} onChange={e => setConfig({...config, ruinerMinTime: Number(e.target.value)})} className="w-14 bg-slate-900 border border-slate-700 rounded-lg px-1 py-1 text-white text-xs font-bold outline-none text-center" title="Мин сек" />
+                                                            <span className="text-slate-500">-</span>
+                                                            <input type="number" value={config.ruinerMaxTime} onChange={e => setConfig({...config, ruinerMaxTime: Number(e.target.value)})} className="w-14 bg-slate-900 border border-slate-700 rounded-lg px-1 py-1 text-white text-xs font-bold outline-none text-center" title="Макс сек" />
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className={`bg-gradient-to-br from-cyan-900/20 to-slate-900 border ${config.isFreezeEnabled ? 'border-cyan-500/50 shadow-[0_0_20px_rgba(6,182,212,0.1)]' : 'border-slate-800'} p-6 rounded-2xl transition`}>
+                                            <div className="flex justify-between items-center mb-6">
+                                                <div className="flex items-center gap-2"><i className="fa-solid fa-snowflake text-cyan-500 text-xl"></i><h3 className="font-bold text-white text-lg">Заморозка таймера</h3></div>
+                                                <div onClick={() => setConfig({...config, isFreezeEnabled: !config.isFreezeEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer ${config.isFreezeEnabled ? 'bg-cyan-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.isFreezeEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                            </div>
+                                            <div className={!config.isFreezeEnabled ? 'opacity-30 pointer-events-none' : ''}>
+                                                <div className="space-y-4">
+                                                    <div>
+                                                        <label className="text-xs text-slate-400 font-bold block mb-2">ЗАМОРОЗИТЬ (Активация)</label>
+                                                        {renderTrigger(config.giftFreeze, 'giftFreeze', 'freezeDonationAmount', 'focus-within:border-cyan-500', 'text-cyan-500')}
+                                                        <div className="flex items-center gap-2 mt-2">
+                                                            <label className="text-xs text-slate-400 font-bold w-full">Длительность заморозки (сек):</label>
+                                                            <input type="number" value={config.freezeDuration} onChange={e => setConfig({...config, freezeDuration: Number(e.target.value)})} className="w-24 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-cyan-400 font-bold outline-none text-center" />
+                                                        </div>
+                                                    </div>
+                                                    
+                                                    <div className="border-t border-slate-800 pt-4">
+                                                        <label className="text-xs text-slate-400 font-bold block mb-2">РАЗМОРОЗИТЬ (Досрочно)</label>
+                                                        {renderTrigger(config.giftUnfreeze, 'giftUnfreeze', 'unfreezeDonationAmount', 'focus-within:border-orange-500', 'text-orange-500')}
+                                                        <div className="flex items-center gap-2 mt-2">
+                                                            <label className="text-xs text-slate-400 font-bold w-full">Шаг разморозки (сек):</label>
+                                                            <input type="number" value={config.unfreezeDuration} onChange={e => setConfig({...config, unfreezeDuration: Number(e.target.value)})} className="w-24 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-orange-400 font-bold outline-none text-center" />
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className={`bg-gradient-to-br from-pink-900/20 to-slate-900 border ${config.isReverseEnabled ? 'border-pink-500/50 shadow-[0_0_20px_rgba(219,39,119,0.1)]' : 'border-slate-800'} p-6 rounded-2xl transition`}>
+                                            <div className="flex justify-between items-center mb-6">
+                                                <div className="flex items-center gap-2"><i className="fa-solid fa-clock-rotate-left text-pink-500 text-xl"></i><h3 className="font-bold text-white text-lg">Разворот времени</h3></div>
+                                                <div onClick={() => setConfig({...config, isReverseEnabled: !config.isReverseEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer ${config.isReverseEnabled ? 'bg-pink-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.isReverseEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                            </div>
+                                            <div className={!config.isReverseEnabled ? 'opacity-30 pointer-events-none' : ''}>
+                                                <label className="text-xs text-slate-400 font-bold block mb-2">Подарок РАЗВОРОТА</label>
+                                                {renderTrigger(config.giftReverse, 'giftReverse', 'reverseDonationAmount', 'focus-within:border-pink-500', 'text-pink-500')}
+                                                <p className="text-xs text-slate-400 mt-2 font-semibold p-3 bg-slate-950 rounded-lg border border-slate-800">
+                                                    <i className="fa-solid fa-circle-info mr-1 text-pink-500"></i> При выпадении таймер перестает убывать и начинает расти. Повторное выпадение возвращает нормальный ход времени.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className={`bg-gradient-to-br from-amber-900/20 to-slate-900 border ${config.isMultiplierGiftEnabled ? 'border-amber-500/50 shadow-[0_0_20px_rgba(245,158,11,0.1)]' : 'border-slate-800'} p-6 rounded-2xl transition`}>
+                                            <div className="flex justify-between items-center mb-6">
+                                                <div className="flex items-center gap-2"><i className="fa-solid fa-bolt text-amber-500 text-xl"></i><h3 className="font-bold text-white">Прибавление Х</h3></div>
+                                                <div onClick={() => setConfig({...config, isMultiplierGiftEnabled: !config.isMultiplierGiftEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer ${config.isMultiplierGiftEnabled ? 'bg-amber-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.isMultiplierGiftEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                            </div>
+                                            <div className={!config.isMultiplierGiftEnabled ? 'opacity-30 pointer-events-none' : ''}>
+                                                {renderTrigger(config.giftMultiplier, 'giftMultiplier', 'multiplierDonationAmount', 'focus-within:border-amber-500', 'text-amber-500')}
+                                                <div className="flex gap-2">
+                                                    <div className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 flex items-center"><span className="text-amber-500 font-bold mr-2">x</span><input type="number" value={config.multiplierValue} onChange={e=>setConfig({...config, multiplierValue: Number(e.target.value)})} className="bg-transparent w-full outline-none font-bold text-white"/></div>
+                                                    <div className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 flex items-center"><input type="number" value={config.multiplierDuration} onChange={e=>setConfig({...config, multiplierDuration: Number(e.target.value)})} className="bg-transparent w-full outline-none font-bold text-white text-right"/><span className="text-slate-500 text-xs ml-2 font-bold">СЕК</span></div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className={`bg-gradient-to-br from-purple-900/20 to-slate-900 border ${config.isDebuffGiftEnabled ? 'border-purple-500/50 shadow-[0_0_20px_rgba(168,85,247,0.1)]' : 'border-slate-800'} p-6 rounded-2xl transition`}>
+                                            <div className="flex justify-between items-center mb-6">
+                                                <div className="flex items-center gap-2"><i className="fa-solid fa-skull text-purple-500 text-xl"></i><h3 className="font-bold text-white">Убавление Х</h3></div>
+                                                <div onClick={() => setConfig({...config, isDebuffGiftEnabled: !config.isDebuffGiftEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer ${config.isDebuffGiftEnabled ? 'bg-purple-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.isDebuffGiftEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                            </div>
+                                            <div className={!config.isDebuffGiftEnabled ? 'opacity-30 pointer-events-none' : ''}>
+                                                {renderTrigger(config.giftDebuff, 'giftDebuff', 'debuffDonationAmount', 'focus-within:border-purple-500', 'text-purple-500')}
+                                                <div className="flex gap-2 mt-2">
+                                                    <div className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 flex items-center"><span className="text-purple-500 font-bold mr-2">x</span><input type="number" value={config.debuffValue} onChange={e=>setConfig({...config, debuffValue: Number(e.target.value)})} className="bg-transparent w-full outline-none font-bold text-white"/></div>
+                                                    <div className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 flex items-center"><input type="number" value={config.debuffDuration} onChange={e=>setConfig({...config, debuffDuration: Number(e.target.value)})} className="bg-transparent w-full outline-none font-bold text-white text-right"/><span className="text-slate-500 text-xs ml-2 font-bold">СЕК</span></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {}
+                                    <div className={`bg-gradient-to-br from-rose-900/20 to-slate-900 border ${config.isPenaltyEnabled ? 'border-rose-500/50 shadow-[0_0_20px_rgba(244,63,94,0.1)]' : 'border-slate-800'} p-6 rounded-2xl transition`}>
+                                        <div className="flex justify-between items-center mb-6">
+                                            <div className="flex items-center gap-2"><i className="fa-solid fa-triangle-exclamation text-rose-500 text-xl"></i><h3 className="font-bold text-white text-lg">Отнять до порога()</h3></div>
+                                            <div className="flex items-center gap-4">
+                                                <button onClick={() => setConfig({...config, penalties: [...(config.penalties||[]), { id: Date.now().toString(), gift: null, donationAmount: '', penaltyAmount: 600, penaltyThreshold: 300, isEnabled: true }]})} className="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-sm font-bold transition flex items-center gap-1 text-white"><i className="fa-solid fa-plus"></i> Добавить</button>
+                                                <div onClick={() => setConfig({...config, isPenaltyEnabled: !config.isPenaltyEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer ${config.isPenaltyEnabled ? 'bg-rose-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.isPenaltyEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                            </div>
+                                        </div>
+                                        <div className={`space-y-3 ${!config.isPenaltyEnabled ? 'opacity-30 pointer-events-none' : ''}`}>
+                                            {(config.penalties || []).map(p => (
+                                                <div key={p.id} className={`flex flex-wrap xl:flex-nowrap items-center bg-slate-950 p-3 rounded-xl border ${p.isEnabled ? 'border-rose-500/30' : 'border-slate-800 opacity-50'} gap-3`}>
+                                                    <div onClick={() => setConfig(prev=>({...prev, penalties: prev.penalties.map(x=>x.id===p.id?{...x, isEnabled: !x.isEnabled}:x)}))} className={`w-10 h-5 rounded-full relative cursor-pointer shrink-0 ${p.isEnabled ? 'bg-rose-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${p.isEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                                    
+                                                    <div className="flex items-center gap-2 bg-slate-900 p-2 rounded-lg border border-slate-700 cursor-pointer hover:border-rose-500 flex-1 min-w-[120px] overflow-hidden" onClick={() => setModal({ isOpen: true, key: `penalty_${p.id}` })}>
+                                                        {p.gift ? <><img src={p.gift.icon} className="w-5 h-5 shrink-0 object-contain"/> <span className="font-bold text-xs text-white truncate">{p.gift.name}</span></> : <span className="text-slate-500 text-xs font-bold truncate">Выбрать подарок...</span>}
+                                                    </div>
+
+                                                    <div className="flex items-center gap-1 bg-slate-900 px-2 py-1.5 rounded-lg border border-slate-700 shrink-0 focus-within:border-rose-500 transition">
+                                                        <span className="text-[10px] text-slate-400 font-bold uppercase"><i className="fa-solid fa-ruble-sign mr-1"></i>Донат:</span>
+                                                        <input type="number" value={p.donationAmount || ''} onChange={e => setConfig(prev=>({...prev, penalties: prev.penalties.map(x=>x.id===p.id?{...x, donationAmount: e.target.value === '' ? '' : Number(e.target.value)}:x)}))} className="w-16 bg-transparent text-xs text-white font-bold outline-none text-right" placeholder="0" />
+                                                    </div>
+
+                                                    <div className="flex items-center gap-1 bg-slate-900 px-2 py-1.5 rounded-lg border border-slate-700 shrink-0">
+                                                        <span className="text-[10px] text-rose-400 font-bold uppercase">Отнять:</span>
+                                                        <input type="number" value={p.penaltyAmount} onChange={e => setConfig(prev=>({...prev, penalties: prev.penalties.map(x=>x.id===p.id?{...x, penaltyAmount: Number(e.target.value)}:x)}))} className="w-12 bg-transparent text-xs text-rose-400 font-bold outline-none text-center" placeholder="Сек" />
+                                                    </div>
+
+                                                    <div className="flex items-center gap-1 bg-slate-900 px-2 py-1.5 rounded-lg border border-slate-700 shrink-0" title="Не опускать ниже (Защита)">
+                                                        <span className="text-[10px] text-slate-400 font-bold uppercase">Лимит:</span>
+                                                        <input type="number" value={p.penaltyThreshold} onChange={e => setConfig(prev=>({...prev, penalties: prev.penalties.map(x=>x.id===p.id?{...x, penaltyThreshold: Number(e.target.value)}:x)}))} className="w-12 bg-transparent text-xs text-white font-bold outline-none text-center" placeholder="Сек" />
+                                                    </div>
+                                                    
+                                                    <button onClick={() => setConfig(prev=>({...prev, penalties: prev.penalties.filter(x=>x.id!==p.id)}))} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:text-rose-500 bg-slate-900 rounded-lg transition shrink-0"><i className="fa-solid fa-trash"></i></button>
+                                                </div>
+                                            ))}
+                                            {(config.penalties || []).length === 0 && <div className="text-center text-slate-500 text-sm py-4">Нет штрафов. Нажмите «Добавить», чтобы создать первый.</div>}
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className={`bg-gradient-to-br from-blue-900/20 to-slate-900 border ${config.isSetTimeEnabled ? 'border-blue-500/50 shadow-[0_0_20px_rgba(59,130,246,0.1)]' : 'border-slate-800'} p-6 rounded-2xl transition`}>
+                                            <div className="flex justify-between items-center mb-6">
+                                                <div className="flex items-center gap-2"><i className="fa-solid fa-clock text-blue-500 text-xl"></i><h3 className="font-bold text-white">Установить время</h3></div>
+                                                <div onClick={() => setConfig({...config, isSetTimeEnabled: !config.isSetTimeEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer ${config.isSetTimeEnabled ? 'bg-blue-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.isSetTimeEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                            </div>
+                                            <div className={!config.isSetTimeEnabled ? 'opacity-30 pointer-events-none' : ''}>
+                                                {renderTrigger(config.giftSetTime, 'giftSetTime', 'setTimeDonationAmount', 'focus-within:border-blue-500', 'text-blue-500')}
+                                                <label className="text-xs text-slate-400 font-bold block mb-1 mt-2">На какое время (сек):</label>
+                                                <input type="number" value={config.setTimeValue} onChange={e => setConfig({...config, setTimeValue: Number(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-blue-400 font-bold outline-none text-center" />
+                                            </div>
+                                        </div>
+                                        
+                                        <div className={`bg-gradient-to-br from-red-900/20 to-slate-900 border ${config.isResetEnabled ? 'border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.1)]' : 'border-slate-800'} p-6 rounded-2xl transition`}>
+                                            <div className="flex justify-between items-center mb-6">
+                                                <div className="flex items-center gap-2"><i className="fa-solid fa-power-off text-red-500 text-xl"></i><h3 className="font-bold text-white">Обнулить таймер</h3></div>
+                                                <div onClick={() => setConfig({...config, isResetEnabled: !config.isResetEnabled})} className={`w-10 h-5 rounded-full relative cursor-pointer ${config.isResetEnabled ? 'bg-red-500' : 'bg-slate-700'}`}><div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${config.isResetEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div></div>
+                                            </div>
+                                            <div className={!config.isResetEnabled ? 'opacity-30 pointer-events-none' : ''}>
+                                                {renderTrigger(config.giftReset, 'giftReset', 'resetDonationAmount', 'focus-within:border-red-500', 'text-red-500')}
+                                                <p className="text-xs text-slate-400 font-bold mt-2 text-center">При срабатывании таймер сразу опускается до нуля (переход в рулетку доп. времени).</p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl mt-6">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <div className="flex items-center gap-2">
+                                                <i className="fa-solid fa-wand-magic-sparkles text-indigo-400 text-xl"></i>
+                                                <h3 className="font-bold text-white text-lg">Пользовательские триггеры</h3>
+                                            </div>
+                                            <button onClick={() => setConfig({...config, customGifts: [...config.customGifts, { id: Date.now().toString(), gift: null, donationAmount: '', type: 'add', value: 60, isEnabled: true }]})} className="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-sm font-bold transition flex items-center gap-1 text-white">
+                                                <i className="fa-solid fa-plus"></i> Создать
+                                            </button>
+                                        </div>
+                                        
+                                        <div className="space-y-3">
+                                            {config.customGifts.map(cg => (
+                                                <div key={cg.id} className={`flex flex-wrap xl:flex-nowrap gap-3 items-center bg-slate-950 p-3 rounded-xl border ${cg.isEnabled ? 'border-indigo-500/30 shadow-md' : 'border-slate-800 opacity-50'} transition-all`}>
+                                                    <div onClick={() => setConfig(p=>({...p, customGifts: p.customGifts.map(c=>c.id===cg.id?{...c, isEnabled: !c.isEnabled}:c)}))} className={`w-10 h-5 rounded-full relative cursor-pointer shrink-0 ${cg.isEnabled ? 'bg-indigo-500' : 'bg-slate-700'}`}>
+                                                        <div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${cg.isEnabled ? 'translate-x-5' : 'translate-x-1'}`}></div>
+                                                    </div>
+                                                    
+                                                    <div className="flex items-center gap-2 flex-1 min-w-[120px] bg-slate-900 p-2 rounded-lg border border-slate-700 cursor-pointer hover:border-indigo-500 transition overflow-hidden" onClick={() => setModal({ isOpen: true, key: `custom_${cg.id}` })}>
+                                                        {cg.gift ? <><img src={cg.gift.icon} className="w-5 h-5 shrink-0 object-contain"/> <span className="font-bold text-xs text-white truncate">{cg.gift.name}</span></> : <span className="text-slate-500 text-xs font-bold px-2 truncate">Выбрать подарок...</span>}
+                                                    </div>
+
+                                                    <div className="flex items-center gap-1 bg-slate-900 px-2 py-1.5 rounded-lg border border-slate-700 shrink-0 focus-within:border-indigo-500 transition">
+                                                        <span className="text-[10px] text-slate-400 font-bold uppercase"><i className="fa-solid fa-ruble-sign mr-1"></i>Донат:</span>
+                                                        <input type="number" value={cg.donationAmount || ''} onChange={e => setConfig(p=>({...p, customGifts: p.customGifts.map(c=>c.id===cg.id?{...c, donationAmount: e.target.value === '' ? '' : Number(e.target.value)}:c)}))} className="w-16 bg-transparent text-xs text-white font-bold outline-none text-right" placeholder="0" />
+                                                    </div>
+                                                    
+                                                    <select value={cg.type} onChange={e => setConfig(p=>({...p, customGifts: p.customGifts.map(c=>c.id===cg.id?{...c, type: e.target.value}:c)}))} className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-white outline-none font-bold">
+                                                        <option value="add">+ Добавить время</option>
+                                                        <option value="sub">- Отнять время</option>
+                                                        <option value="set">= Установить время</option>
+                                                        <option value="reset">Обнулить (0)</option>
+                                                    </select>
+                                                    
+                                                    {cg.type !== 'reset' ? (
+                                                        <input type="number" value={cg.value} onChange={e => setConfig(p=>({...p, customGifts: p.customGifts.map(c=>c.id===cg.id?{...c, value: Number(e.target.value)}:c)}))} className="w-20 bg-slate-900 border border-slate-700 rounded-lg px-2 py-2 text-xs text-center font-bold text-white outline-none" placeholder="Сек" />
+                                                    ) : (
+                                                        <div className="w-20 hidden md:block"></div> 
+                                                    )}
+                                                    
+                                                    <button onClick={() => setConfig(p=>({...p, customGifts: p.customGifts.filter(c=>c.id!==cg.id)}))} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:text-rose-500 bg-slate-900 rounded-lg transition shrink-0"><i className="fa-solid fa-trash"></i></button>
+                                                </div>
+                                            ))}
+                                            {config.customGifts.length === 0 && <div className="text-center text-slate-500 text-sm py-4">Нет пользовательских триггеров</div>}
+                                        </div>
+                                    </div>
+                                    
+                                </div>
+                            )}
+
+                            {}
+                            {activeTab === 'roulette' && (
+                                <div className="space-y-6 animate-fade-in">
+                                    <div className="flex justify-between items-center mb-8">
+                                        <h2 className="text-3xl font-black text-white mb-8">Рулетки</h2>
+                                        <button onClick={() => {
+                                            const newId = Date.now().toString();
+                                            setConfig({
+                                                ...config, 
+                                                roulettes: [...(config.roulettes||[]), { id: newId, name: 'Новая рулетка', triggerType: 'gift', triggerGifts: [], donationAmount: '', likesThreshold: 100000, addsCost: false, isMain: false, slots: [] }]
+                                            });
+                                            setExpandedRoulette(newId);
+                                        }} className="bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-xl text-sm font-bold transition text-white shadow-lg flex items-center gap-2">
+                                            <i className="fa-solid fa-plus"></i> Создать рулетку
+                                        </button>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        {(!config.roulettes || config.roulettes.length === 0) && (
+                                            <div className="text-center py-10 bg-slate-900 rounded-2xl border border-slate-800 text-slate-500 font-bold">У вас пока нет ни одной рулетки. Создайте первую!</div>
+                                        )}
+                                        
+                                        {(config.roulettes || []).map(r => (
+                                            <div key={r.id} className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden transition-all">
+                                                
+                                                <div className="p-4 flex justify-between items-center cursor-pointer hover:bg-slate-800/50 transition border-l-4 border-indigo-500" onClick={() => setExpandedRoulette(expandedRoulette === r.id ? null : r.id)}>
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="w-6 flex justify-center text-slate-500">
+                                                            <i className={`fa-solid fa-chevron-${expandedRoulette === r.id ? 'down' : 'right'} transition-transform`}></i>
+                                                        </div>
+                                                        <span className="font-bold text-lg text-white">{r.name}</span>
+                                                        {r.isMain && <span className="bg-emerald-500/20 text-emerald-400 text-[10px] px-2 py-1 rounded font-bold uppercase tracking-wider ml-2 border border-emerald-500/30">Основная</span>}
+                                                        <div className="flex gap-2">
+                                                            {(r.triggerType === 'gift' || r.triggerType === 'both') && <span className="text-[10px] bg-purple-500/20 text-purple-400 px-2 py-1 rounded-md font-bold uppercase tracking-wider">Подарки ({(r.triggerGifts || []).length})</span>}
+                                                            {(r.triggerType === 'like' || r.triggerType === 'both') && <span className="text-[10px] bg-rose-500/20 text-rose-400 px-2 py-1 rounded-md font-bold uppercase tracking-wider">Лайки</span>}
+                                                            <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-1 rounded-md font-bold uppercase tracking-wider">Слотов: {r.slots?.length || 0}</span>
+                                                        </div>
+                                                    </div>
+                                                    <button onClick={(e) => { e.stopPropagation(); setConfig({...config, roulettes: config.roulettes.filter(x => x.id !== r.id)}); }} className="w-8 h-8 flex items-center justify-center text-slate-500 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition" title="Удалить рулетку">
+                                                        <i className="fa-solid fa-trash"></i>
+                                                    </button>
+                                                </div>
+
+                                                {expandedRoulette === r.id && (
+                                                    <div className="p-6 border-t border-slate-800 space-y-6 bg-slate-950/30">
+                                                        
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                            <div>
+                                                                <label className="text-xs font-bold text-slate-400 mb-1 block">Название рулетки</label>
+                                                                <input type="text" value={r.name} onChange={e => updateRoulette(r.id, 'name', e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-bold outline-none focus:border-indigo-500" placeholder="Например: Рулетка за подарки" />
+                                                            </div>
+                                                            <div>
+                                                                <label className="text-xs font-bold text-slate-400 mb-1 block">Тип триггера запуска</label>
+                                                                <select value={r.triggerType} onChange={e => updateRoulette(r.id, 'triggerType', e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-bold outline-none focus:border-indigo-500">
+                                                                    <option value="gift">Только за Подарки / Донаты</option>
+                                                                    <option value="like">Только за Лайки (Цели)</option>
+                                                                    <option value="both">За Подарки, Донаты и Лайки</option>
+                                                                </select>
+                                                            </div>
+                                                        </div>
+
+                                                        {(r.triggerType === 'gift' || r.triggerType === 'both') && (
+                                                            <div className="bg-slate-900 border border-purple-500/30 p-4 rounded-xl shadow-[0_0_15px_rgba(168,85,247,0.05)]">
+                                                                <label className="text-xs font-bold text-slate-400 mb-3 block uppercase tracking-wider text-purple-400"><i className="fa-solid fa-gift mr-1"></i> Подарки для запуска</label>
+                                                                <div className="flex flex-wrap gap-2 items-center mb-4">
+                                                                    {(r.triggerGifts || []).map((g, i) => (
+                                                                        <div key={i} className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-700">
+                                                                            <img src={g.icon} className="w-5 h-5 drop-shadow-md"/>
+                                                                            <span className="text-xs font-bold text-white">{g.name}</span>
+                                                                            <i className="fa-solid fa-xmark text-slate-500 hover:text-rose-500 cursor-pointer transition-colors" onClick={() => updateRoulette(r.id, 'triggerGifts', r.triggerGifts.filter((_, idx) => idx !== i))}></i>
+                                                                        </div>
+                                                                    ))}
+                                                                    <button onClick={() => setModal({ isOpen: true, key: `addRouletteGift_${r.id}` })} className="bg-purple-600/20 hover:bg-purple-600/40 text-purple-400 px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 border border-purple-500/30">
+                                                                        <i className="fa-solid fa-plus"></i> Добавить подарок
+                                                                    </button>
+                                                                </div>
+
+                                                                <div className="flex items-center gap-3 bg-slate-950 p-2 rounded-lg border border-slate-700 mt-3 max-w-sm focus-within:border-purple-500 transition-colors">
+                                                                    <span className="text-xs text-purple-400 font-bold uppercase"><i className="fa-solid fa-ruble-sign mr-1"></i> Точная сумма доната:</span>
+                                                                    <input type="number" value={r.donationAmount || ''} onChange={e => updateRoulette(r.id, 'donationAmount', e.target.value === '' ? '' : Number(e.target.value))} className="flex-1 bg-transparent text-sm text-white font-black outline-none text-right focus:text-purple-300" placeholder="0" />
+                                                                </div>
+
+                                                                <div className="flex items-center gap-3 mt-4 cursor-pointer pt-4 border-t border-slate-800" onClick={() => updateRoulette(r.id, 'addsCost', !r.addsCost)}>
+                                                                    <div className={`w-10 h-5 rounded-full relative transition-colors ${r.addsCost ? 'bg-purple-500' : 'bg-slate-700'}`}>
+                                                                        <div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${r.addsCost ? 'translate-x-5' : 'translate-x-1'}`}></div>
+                                                                    </div>
+                                                                    <div className="flex flex-col">
+                                                                        <span className="text-sm font-bold text-slate-200">Плюсовать стоимость к таймеру (+сек) при прокруте</span>
+                                                                        <span className="text-xs text-slate-500">Добавляет стоимость подарка (алмазы) или сумму доната в таймер</span>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        <div className="flex items-center gap-3 bg-slate-900 p-4 rounded-xl border border-emerald-500/30 shadow-[0_0_15px_rgba(16,185,129,0.05)] cursor-pointer hover:border-emerald-500 transition-colors" onClick={() => {
+                                                            setConfig(prev => ({
+                                                                ...prev,
+                                                                roulettes: prev.roulettes.map(roulette => ({
+                                                                    ...roulette,
+                                                                    isMain: roulette.id === r.id
+                                                                }))
+                                                            }));
+                                                        }}>
+                                                            <div className={`w-10 h-5 rounded-full relative transition-colors ${r.isMain ? 'bg-emerald-500' : 'bg-slate-700'}`}>
+                                                                <div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${r.isMain ? 'translate-x-5' : 'translate-x-1'}`}></div>
+                                                            </div>
+                                                            <div className="flex flex-col">
+                                                                <span className="text-sm font-bold text-emerald-400">Сделать основной рулеткой</span>
+                                                                <span className="text-xs text-slate-500">Именно она будет запускаться при получении атаки "ЕЩЕ ПРОКРУТ" от соперника</span>
+                                                            </div>
+                                                        </div>
+
+                                                        {(r.triggerType === 'like' || r.triggerType === 'both') && (
+                                                            <div className="bg-slate-900 border border-rose-500/30 p-4 rounded-xl flex items-center justify-between gap-4 shadow-[0_0_15px_rgba(244,63,94,0.05)]">
+                                                                <div className="flex flex-col">
+                                                                    <span className="text-sm font-bold text-rose-400 uppercase tracking-wider"><i className="fa-solid fa-heart mr-1"></i> Крутить за лайки</span>
+                                                                    <span className="text-xs text-slate-500 mt-1">Опирается на общие лайки (напр. каждые 100 000)</span>
+                                                                </div>
+                                                                <div className="flex items-center">
+                                                                    <input type="number" value={r.likesThreshold} onChange={e => updateRoulette(r.id, 'likesThreshold', Number(e.target.value))} className="w-28 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-black text-right outline-none focus:border-rose-500" />
+                                                                    <span className="text-xs text-slate-400 font-bold ml-2 uppercase">лайков</span>
+                                                                </div>
+                                                            </div>
+                                                        )}
+
+                                                        <div className="border-t border-slate-800 pt-6">
+                                                            <div className="flex justify-between items-center mb-4">
+                                                                <h3 className="font-bold text-slate-300 uppercase tracking-wider text-sm">Слоты колеса ({r.slots?.length || 0})</h3>
+                                                                <button onClick={() => updateRoulette(r.id, 'slots', [...(r.slots||[]), { id: Date.now().toString(), label: 'Новый слот', type: 'add_time', value: 60, chance: 10, color: '#6366f1', isEliminable: false, isEnabled: true, target: 'self' }])} className="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1 text-white shadow-md">
+                                                                    <i className="fa-solid fa-plus"></i> Добавить слот
+                                                                </button>
+                                                            </div>
+                                                            <div className="space-y-3">
+                                                                {(r.slots || []).map(slot => (
+                                                                    <div key={slot.id} className={`flex flex-wrap gap-2 items-center bg-slate-950 p-3 rounded-xl border relative group transition-all ${slot.isEnabled !== false ? 'border-slate-800 hover:border-indigo-500/30' : 'border-slate-800/50 opacity-50'}`}>
+                                                                        
+                                                                        <div onClick={() => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, isEnabled: s.isEnabled === false ? true : false}:s))} className={`w-10 h-5 rounded-full relative cursor-pointer shrink-0 transition-colors ${slot.isEnabled !== false ? 'bg-emerald-500' : 'bg-slate-700'}`} title="Включить / Выключить слот">
+                                                                            <div className={`w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform ${slot.isEnabled !== false ? 'translate-x-5' : 'translate-x-1'}`}></div>
+                                                                        </div>
+
+                                                                        <input type="color" value={slot.color} onChange={e => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, color: e.target.value}:s))} className="w-8 h-8 rounded border-none bg-transparent cursor-pointer shrink-0" />
+                                                                        <input type="text" value={slot.label} onChange={e => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, label: e.target.value}:s))} className="flex-1 min-w-[120px] bg-transparent outline-none font-bold text-white border-b border-slate-700 focus:border-indigo-500 px-2" placeholder="Название..." />
+                                                                        
+                                                                        <select value={slot.type} onChange={e => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, type: e.target.value}:s))} className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white outline-none font-bold shrink-0">
+                                                                            <option value="add_time">+ Время</option><option value="sub_time">- Время</option><option value="multiply_time">Умножить (*)</option><option value="divide_time">Разделить (/)</option><option value="set_time">= Время</option><option value="swap_time">Обмен таймером</option><option value="multiplier">Бафф x</option><option value="debuff">Дебафф x</option><option value="freeze">Заморозка</option><option value="unfreeze">Разморозка</option><option value="reverse_time">Разворот времени</option><option value="extra_spin">Еще прокрут</option><option value="ruiner">Руинер</option><option value="save">Сейв</option><option value="reset_time">Обнулить</option><option value="special">Приз</option>
+                                                                        </select>
+                                                                        
+                                                                        <select value={slot.target || 'self'} onChange={e => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, target: e.target.value}:s))} className={`border rounded-lg px-2 py-1.5 text-xs outline-none font-bold shrink-0 transition-colors ${['opponent', 'all', 'random'].includes(slot.target) ? 'bg-rose-500/20 text-rose-400 border-rose-500/50' : 'bg-indigo-500/20 text-indigo-400 border-indigo-500/50'}`}>
+                                                                            <option value="self" className="bg-slate-900 text-white">🎯 Себе</option>
+                                                                            <option value="opponent" className="bg-slate-900 text-white">⚔️ Сопернику (Выбор)</option>
+                                                                            <option value="all" className="bg-slate-900 text-white">💥 Всем сразу</option>
+                                                                            <option value="random" className="bg-slate-900 text-white">🎲 Рандом</option>
+                                                                        </select>
+
+                                                                        {['multiply_time','divide_time','multiplier','debuff'].includes(slot.type) && (
+                                                                            <input type="number" value={slot.multiplierValue||2} onChange={e => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, multiplierValue: Number(e.target.value)}:s))} className="w-12 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-center font-bold text-white outline-none shrink-0" placeholder="x" title="Множитель" />
+                                                                        )}
+                                                                        
+                                                                        {['add_time','sub_time','set_time','multiplier','debuff','extra_spin', 'ruiner', 'save'].includes(slot.type) && (
+                                                                            <input type="number" value={slot.value} onChange={e => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, value: Number(e.target.value)}:s))} className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-center font-bold text-white outline-none shrink-0" placeholder={['extra_spin', 'ruiner', 'save'].includes(slot.type) ? "Кол-во" : "Сек"} title={['multiplier','debuff'].includes(slot.type) ? "Время действия (сек)" : ['extra_spin', 'ruiner', 'save'].includes(slot.type) ? "Количество" : "Секунды"} />
+                                                                        )}
+                                                                        
+                                                                        <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 w-20 shrink-0">
+                                                                            <input type="number" value={slot.chance} onChange={e => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, chance: Number(e.target.value)}:s))} className="bg-transparent w-full outline-none text-xs text-right font-bold text-white"/> <span className="text-xs text-slate-500 ml-1 font-bold">%</span>
+                                                                        </div>
+                                                                        
+                                                                        <button onClick={() => updateRoulette(r.id, 'slots', r.slots.map(s=>s.id===slot.id?{...s, isEliminable: !s.isEliminable}:s))} className={`flex shrink-0 items-center justify-center px-2 py-1.5 rounded-lg text-xs font-bold transition border ${slot.isEliminable ? 'bg-indigo-500/20 text-indigo-400 border-indigo-500/50' : 'bg-slate-900 text-slate-500 border-slate-700 hover:text-slate-300'}`} title="Если активно, слот выбывает после выпадения из рулетки до перезапуска таймера">
+                                                                            <i className={`fa-solid ${slot.isEliminable ? 'fa-eye-slash' : 'fa-rotate'} mr-1`}></i>
+                                                                            {slot.isEliminable ? '1 РАЗ' : 'МНОГОРАЗ.'}
+                                                                        </button>
+
+                                                                        <button onClick={() => updateRoulette(r.id, 'slots', r.slots.filter(s=>s.id!==slot.id))} className="w-8 h-8 flex items-center justify-center text-slate-600 hover:text-rose-500 bg-slate-900 rounded-full transition shrink-0"><i className="fa-solid fa-xmark"></i></button>
+                                                                    </div>
+                                                                ))}
+                                                                {(!r.slots || r.slots.length === 0) && (
+                                                                    <div className="text-center text-slate-500 text-sm py-2">Слотов нет. Колесо крутиться не будет!</div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {}
+                            {activeTab === 'style' && (
+                                <div className="space-y-6 animate-fade-in">
+                                    <h2 className="text-3xl font-black text-white mb-8">Оформление</h2>
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                        
+                                        <div className="space-y-6">
+                                            <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl flex flex-col gap-6">
+                                                <div>
+                                                    <label className="text-xs font-bold text-slate-400 mb-2 block uppercase">Шрифт Таймера</label>
+                                                    <select value={config.styles.fontFamily} onChange={e => setConfig({...config, styles: {...config.styles, fontFamily: e.target.value}})} className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-white font-medium outline-none focus:border-indigo-500 custom-scrollbar">
+                                                        {fontOptions.map(font => (
+                                                            <option key={font.value} value={font.value} style={{ fontFamily: font.value }}>{font.label}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+                                                
+                                                <div>
+                                                    <div className="flex justify-between items-center mb-2">
+                                                        <label className="text-xs font-bold text-slate-400 block uppercase">Интенсивность свечения</label>
+                                                        <span className="text-xs font-bold text-indigo-400">{Math.round((config.styles.timerGlow !== undefined ? config.styles.timerGlow : 0.4) * 100)}%</span>
+                                                    </div>
+                                                    <input type="range" min="0" max="1" step="0.05" value={config.styles.timerGlow !== undefined ? config.styles.timerGlow : 0.4} onChange={e => setConfig({...config, styles: {...config.styles, timerGlow: parseFloat(e.target.value)}})} className="w-full accent-indigo-500 h-2 bg-slate-950 rounded-lg appearance-none cursor-pointer" />
+                                                </div>
+
+                                                <div className="flex items-center gap-4 bg-slate-950 p-4 rounded-xl border border-slate-700 w-full mt-2 cursor-pointer hover:border-indigo-500 transition shadow-inner" onClick={() => setConfig({...config, styles: {...config.styles, enableStroke: config.styles.enableStroke !== false ? false : true}})}>
+                                                    <div className={`w-12 h-6 rounded-full relative transition-colors shrink-0 ${config.styles.enableStroke !== false ? 'bg-indigo-500' : 'bg-slate-700'}`}>
+                                                        <div className={`w-5 h-5 rounded-full bg-white absolute top-0.5 transition-transform ${config.styles.enableStroke !== false ? 'translate-x-6' : 'translate-x-1'}`}></div>
+                                                    </div>
+                                                    <div>
+                                                        <span className="text-sm font-bold text-white uppercase block">Черная обводка текста</span>
+                                                        <span className="text-xs text-slate-500">Делает цифры четкими на светлом фоне</span>
+                                                    </div>
+                                                </div>
+
+                                                <div className="grid grid-cols-2 gap-4">
+                                                    <ColorPicker label="Цвет таймера" value={config.styles.timerColor} onChange={e => setConfig({...config, styles: {...config.styles, timerColor: e.target.value}})} />
+                                                    <div className="hidden md:block"></div>
+                                                    <ColorPicker label="Всплывающее (+ Время)" value={config.styles.floatPlusColor} onChange={e => setConfig({...config, styles: {...config.styles, floatPlusColor: e.target.value}})} />
+                                                    <ColorPicker label="Всплывающее (- Время)" value={config.styles.floatMinusColor} onChange={e => setConfig({...config, styles: {...config.styles, floatMinusColor: e.target.value}})} />
+                                                    <ColorPicker label="Таймер при БАФФЕ" value={config.styles.buffColor} onChange={e => setConfig({...config, styles: {...config.styles, buffColor: e.target.value}})} />
+                                                    <ColorPicker label="Таймер при ДЕБАФФЕ" value={config.styles.debuffColor} onChange={e => setConfig({...config, styles: {...config.styles, debuffColor: e.target.value}})} />
+                                                    <ColorPicker label="Фон карточки БАФФА" value={config.styles.buffCardBg} onChange={e => setConfig({...config, styles: {...config.styles, buffCardBg: e.target.value}})} />
+                                                    <ColorPicker label="Фон карточки ДЕБАФФА" value={config.styles.debuffCardBg} onChange={e => setConfig({...config, styles: {...config.styles, debuffCardBg: e.target.value}})} />
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-slate-900 border border-slate-800 rounded-2xl flex flex-col items-center justify-center relative overflow-hidden h-full min-h-[300px]">
+                                            <div className="absolute top-4 left-4 text-xs font-bold tracking-widest text-slate-500 uppercase z-20">Превью</div>
+                                            <div className="font-black tabular-nums transition-all mt-4 z-10 relative"
+                                                style={{ 
+                                                    fontFamily: config.styles.fontFamily, 
+                                                    color: config.styles.timerColor,
+                                                    textShadow: getStroke(true, config.styles.enableStroke !== false, `0px 10px 40px ${hexToRgba(config.styles.timerColor, config.styles.timerGlow !== undefined ? config.styles.timerGlow : 0.4)}, 0px 0px 60px ${hexToRgba(config.styles.timerColor, (config.styles.timerGlow !== undefined ? config.styles.timerGlow : 0.4) * 0.75)}`),
+                                                    fontSize: `5rem`
+                                                }}>
+                                                00:15:00
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                </div>
+                            )}
+
+                        </div>
+                    </div>
+                    
+                    {}
+                    {hasChanges && (
+                        <div id="save-bar" className="absolute top-6 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur-md border border-indigo-500/50 p-2 rounded-full shadow-[0_10px_40px_rgba(0,0,0,0.8)] flex items-center gap-2 z-50 animate-fade-in-down-centered">
+                            <button onClick={handleSave} className="w-12 h-12 flex items-center justify-center bg-emerald-600 hover:bg-emerald-500 rounded-full text-white shadow-[0_0_15px_rgba(16,185,129,0.5)] transition group" title="Сохранить">
+                                <i className="fa-solid fa-check text-2xl group-hover:scale-110 transition-transform"></i>
+                            </button>
+                            <button onClick={handleCancel} className="w-12 h-12 flex items-center justify-center bg-slate-700 hover:bg-rose-500 rounded-full text-white transition shadow-md group" title="Отменить">
+                                <i className="fa-solid fa-xmark text-2xl group-hover:scale-110 transition-transform"></i>
+                            </button>
+                        </div>
+                    )}
+
+                    <GiftModal isOpen={modal.isOpen} onClose={() => setModal({ isOpen: false, key: null })} onSelect={(gift) => {
+                        if (modal.key.startsWith('custom_')) {
+                            const id = modal.key.split('_')[1];
+                            setConfig(p => ({...p, customGifts: p.customGifts.map(cg => cg.id === id ? { ...cg, gift } : cg)}));
+                        } else if (modal.key.startsWith('addRouletteGift_')) {
+                            const rId = modal.key.split('_')[1];
+                            setConfig(p => ({
+                                ...p, 
+                                roulettes: p.roulettes.map(r => r.id === rId ? { ...r, triggerGifts: [...(r.triggerGifts || []), gift] } : r)
+                            }));
+                        } else if (modal.key.startsWith('penalty_')) {
+                            const id = modal.key.split('_')[1];
+                            setConfig(p => ({...p, penalties: p.penalties.map(x => x.id === id ? { ...x, gift } : x)}));
+                        } else { 
+                            setConfig({ ...config, [modal.key]: gift }); 
+                        }
+                    }} />
+
+                </div>
+            );
+        }
+
+        function LicenseManager({ children, viewMode }) {
+            const [machineId, setMachineId] = useState(null);
+            const [isLicensed, setIsLicensed] = useState(true); 
+            const [isLoading, setIsLoading] = useState(true);
+            const [copied, setCopied] = useState(false);
+
+            const checkLicense = async () => {
+                setIsLoading(true);
+                try {
+                    let mId = machineId;
+                    if (!mId) {
+                        mId = await ipcRenderer.invoke('get-machine-id');
+                        setMachineId(mId);
+                    }
+
+                    const { data, error } = await supabase
+                        .from('app_licenses')
+                        .select('is_active')
+                        .eq('machine_id', mId)
+                        .single();
+
+                    if (error && error.code === 'PGRST116') {
+                        await supabase.from('app_licenses').insert([{ machine_id: mId, is_active: true }]);
+                        setIsLicensed(true);
+                        localStorage.removeItem('marfaleyBanned');
+                    } else if (data) {
+                        setIsLicensed(data.is_active);
+                        if (!data.is_active) {
+                            localStorage.setItem('marfaleyBanned', 'true');
+                        } else {
+                            localStorage.removeItem('marfaleyBanned');
+                        }
+                    } else if (error) {
+                        if (localStorage.getItem('marfaleyBanned') === 'true') {
+                            setIsLicensed(false);
+                        }
+                    }
+                } catch (e) {
+                    console.error("Ошибка проверки лицензии:", e);
+                    if (localStorage.getItem('marfaleyBanned') === 'true') {
+                        setIsLicensed(false);
+                    }
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            useEffect(() => {
+                checkLicense();
+            }, []);
+
+            useEffect(() => {
+                if (!machineId || !isLicensed) return;
+
+                const handleTrackStream = async (e, { username }) => {
+                    if (!username) return;
+                    try {
+                        const { data } = await supabase.from('app_licenses').select('connected_usernames').eq('machine_id', machineId).single();
+                        let current = data?.connected_usernames || [];
+                        if (!Array.isArray(current)) current = [];
+                        
+                        if (!current.includes(username)) {
+                            current.push(username);
+                            await supabase.from('app_licenses').update({ connected_usernames: current }).eq('machine_id', machineId);
+                        }
+                    } catch (err) { console.error("Ошибка обновления истории аккаунтов:", err); }
+                };
+
+                let pendingCoins = 0;
+                let isSyncing = false;
+
+                const handleTrackCoins = (e, { amount }) => {
+                    pendingCoins += amount;
+                };
+
+                ipcRenderer.on('track-stream', handleTrackStream);
+                ipcRenderer.on('track-coins', handleTrackCoins);
+
+                const syncInterval = setInterval(async () => {
+                    if (pendingCoins > 0 && !isSyncing) {
+                        isSyncing = true;
+                        const coinsToSync = pendingCoins;
+                        pendingCoins = 0; 
+                        try {
+                            const { data } = await supabase.from('app_licenses').select('total_coins').eq('machine_id', machineId).single();
+                            const newTotal = Number(data?.total_coins || 0) + coinsToSync;
+                            await supabase.from('app_licenses').update({ total_coins: newTotal }).eq('machine_id', machineId);
+                        } catch (err) {
+                            pendingCoins += coinsToSync; 
+                        } finally {
+                            isSyncing = false;
+                        }
+                    }
+                }, 15000); 
+
+                return () => {
+                    ipcRenderer.removeListener('track-stream', handleTrackStream);
+                    ipcRenderer.removeListener('track-coins', handleTrackCoins);
+                    clearInterval(syncInterval);
+                };
+            }, [machineId, isLicensed]);
+
+            if (isLoading) {
+                return (
+                    <div className="h-screen w-screen bg-slate-950 flex flex-col items-center justify-center p-8 z-[9999] relative drag-region">
+                        <i className="fa-solid fa-circle-notch fa-spin text-indigo-500 text-6xl mb-4"></i>
+                        <h2 className="text-xl font-bold text-white">Проверка лицензии...</h2>
+                    </div>
+                );
+            }
+
+            if (!isLicensed) {
+                return (
+                    <div className="h-screen w-screen bg-slate-950 flex flex-col items-center justify-center p-8 z-[9999] relative drag-region">
+                        <div className="bg-slate-900 border border-rose-500/50 p-8 rounded-3xl shadow-[0_0_50px_rgba(244,63,94,0.2)] max-w-2xl text-center no-drag">
+                            <i className="fa-solid fa-lock text-rose-500 text-6xl mb-6"></i>
+                            <h1 className="text-3xl font-black text-white mb-4 uppercase">Доступ ограничен</h1>
+                            <p className="text-slate-300 text-lg mb-6">Вы используете программу без лицензии или ваш доступ был приостановлен.</p>
+                            
+                            <div className="bg-slate-950 p-6 rounded-2xl border border-slate-800 mb-8 inline-block text-left w-full">
+                                <p className="text-sm text-slate-400 uppercase font-bold mb-3">Свяжитесь с разработчиком для получения лицензии:</p>
+                                <div className="flex flex-col gap-3">
+                                    <a href="#" onClick={(e) => { e.preventDefault(); require('electron').shell.openExternal('https://t.me/jacobdeads')}} className="flex items-center gap-3 text-white hover:text-indigo-400 transition">
+                                        <i className="fa-brands fa-telegram text-2xl text-blue-500"></i>
+                                        <span className="font-bold text-xl">⚡𝔙𝔏𝔄𝔇ℑ𝔎</span>
+                                    </a>
+                                    <a href="#" onClick={(e) => { e.preventDefault(); require('electron').shell.openExternal('https://www.tiktok.com/@nneensi0')}} className="flex items-center gap-3 text-white hover:text-rose-400 transition">
+                                        <i className="fa-brands fa-tiktok text-2xl"></i>
+                                        <span className="font-bold text-xl">⚡𝕾𝕿𝕽𝕰𝕬𝕸</span>
+                                    </a>
+                                </div>
+                                
+                                <div className="mt-6 pt-6 border-t border-slate-800">
+                                    <p className="text-sm text-slate-400 uppercase font-bold mb-2">Ваш уникальный ID:</p>
+                                    <div className="flex items-center gap-2 bg-slate-900 border border-slate-700 p-3 rounded-xl">
+                                        <code className="flex-1 font-mono text-indigo-300 text-lg select-all overflow-hidden text-ellipsis">{machineId || 'Загрузка...'}</code>
+                                        <button 
+                                            onClick={() => {
+                                                navigator.clipboard.writeText(machineId);
+                                                setCopied(true);
+                                                setTimeout(() => setCopied(false), 2000);
+                                            }} 
+                                            className={`w-12 h-12 flex shrink-0 items-center justify-center rounded-xl transition-all ${copied ? 'bg-emerald-600 scale-105' : 'bg-slate-800 hover:bg-indigo-600'}`}
+                                            title="Скопировать ID"
+                                        >
+                                            <i className={`fa-solid text-xl ${copied ? 'fa-check text-white' : 'fa-copy text-slate-300'}`}></i>
+                                        </button>
+                                    </div>
+                                    {copied && <p className="text-emerald-400 text-xs mt-2 font-bold text-center transition-opacity">ID успешно скопирован в буфер обмена!</p>}
+                                </div>
+                            </div>
+                            
+                            <button onClick={checkLicense} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-xl transition flex items-center justify-center gap-3 text-lg shadow-lg">
+                                <i className="fa-solid fa-arrows-rotate"></i> Обновить статус
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            return children;
+        }
+
+        const rootComponent = (
+            <LicenseManager>
+                <MainView />
+            </LicenseManager>
+        );
+        
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(rootComponent);
+    </script>
+</body>
+</html>

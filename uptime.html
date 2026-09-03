@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Время стрима</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&family=Bebas+Neue&family=Montserrat:wght@400;800&family=Comic+Neue:wght@700&family=Roboto:wght@700;900&family=Open+Sans:wght@700;800&family=Oswald:wght@700&family=Raleway:wght@800;900&family=Nunito:wght@800;900&family=Playfair+Display:wght@700;900&family=Caveat:wght@700&family=Rubik:wght@700;900&family=Pacifico&family=Yanone+Kaffeesatz:wght@700&family=Comfortaa:wght@700&family=Ruslan+Display&family=Kelly+Slab&family=Roboto+Slab:wght@700;900&family=Lobster&family=Alice&family=PT+Sans:wght@700&display=swap');
+        
+        body { 
+            background-color: transparent; 
+            color: #f8fafc; 
+            font-family: 'Inter', sans-serif; 
+            overflow: hidden; 
+            margin: 0;
+            padding: 0;
+        }
+
+        .drag-region { -webkit-app-region: drag; user-select: none; }
+        .no-drag { -webkit-app-region: no-drag; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const { ipcRenderer } = require('electron');
+
+        // Утилиты
+        const hexToRgba = (hex, alpha) => {
+            hex = hex || '#000000'; hex = hex.replace('#', '');
+            let r = parseInt(hex.substring(0, 2), 16) || 0; let g = parseInt(hex.substring(2, 4), 16) || 0; let b = parseInt(hex.substring(4, 6), 16) || 0;
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        };
+
+        const getStroke = (isThick, isEnabled, extraShadow = '') => {
+            if (isEnabled === false) return extraShadow;
+            const stroke = isThick 
+                ? '-0.04em -0.04em 0 #000, 0.04em -0.04em 0 #000, -0.04em 0.04em 0 #000, 0.04em 0.04em 0 #000, -0.04em 0 0 #000, 0.04em 0 0 #000, 0 -0.04em 0 #000, 0 0.04em 0 #000' 
+                : '-0.025em -0.025em 0 #000, 0.025em -0.025em 0 #000, -0.025em 0.025em 0 #000, 0.025em 0.025em 0 #000';
+            return extraShadow ? `${stroke}, ${extraShadow}` : stroke;
+        };
+
+        const useWindowScale = (targetWidth, targetHeight) => {
+            const [scale, setScale] = useState(1);
+            useEffect(() => {
+                const updateScale = () => {
+                    const w = window.innerWidth;
+                    const h = window.innerHeight;
+                    const availableHeight = h - 40; 
+                    
+                    const scaleX = w / targetWidth;
+                    const scaleY = availableHeight / targetHeight;
+                    
+                    setScale(Math.min(scaleX, scaleY, 1)); 
+                };
+                updateScale();
+                window.addEventListener('resize', updateScale);
+                return () => window.removeEventListener('resize', updateScale);
+            }, [targetWidth, targetHeight]);
+            return scale;
+        };
+
+        function UptimeView() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const startTimeParam = urlParams.get('startTime');
+            const rouletteId = urlParams.get('rouletteId');
+
+            const [elapsed, setElapsed] = useState({ h: 0, m: 0, s: 0 });
+            const [likesState, setLikesState] = useState({ currentTotalLikes: 0 });
+            const [config, setConfig] = useState(() => JSON.parse(localStorage.getItem('marfaleyConfig') || localStorage.getItem('astralConfig') || '{}'));
+
+            useEffect(() => {
+                document.title = "Время стрима";
+                ipcRenderer.on('settings-updated', (e, cfg) => setConfig(cfg));
+                ipcRenderer.on('timer-tick', (e, s) => setLikesState({ currentTotalLikes: s.currentTotalLikes }));
+
+                if (!startTimeParam) return;
+
+                const startTimestamp = new Date(startTimeParam).getTime();
+                const interval = setInterval(() => {
+                    const now = Date.now();
+                    const diff = Math.max(0, Math.floor((now - startTimestamp) / 1000));
+                    const h = Math.floor(diff / 3600);
+                    const m = Math.floor((diff % 3600) / 60);
+                    const s = diff % 60;
+                    setElapsed({ h, m, s });
+                }, 1000);
+
+                return () => {
+                    clearInterval(interval);
+                    ipcRenderer.removeAllListeners('settings-updated');
+                    ipcRenderer.removeAllListeners('timer-tick');
+                };
+            }, [startTimeParam]);
+
+            const scale = useWindowScale(1200, 800);
+            const styles = config.styles || {};
+            const fontFam = styles.fontFamily || 'Inter';
+            const baseColor = styles.timerColor || '#ffffff';
+            const glowIntensity = styles.timerGlow !== undefined ? styles.timerGlow : 0.4;
+            const enableStroke = styles.enableStroke !== false;
+
+            let colorStr = baseColor; 
+            let glowStr = getStroke(true, enableStroke, `0px 10px 40px ${hexToRgba(colorStr, glowIntensity)}, 0px 0px 60px ${hexToRgba(colorStr, glowIntensity * 0.75)}`);
+
+            let remainingLikes = 0;
+            if (rouletteId && config.roulettes) {
+                const roulette = config.roulettes.find(r => r.id === rouletteId);
+                if (roulette) {
+                    const threshold = parseInt(roulette.likesThreshold, 10) || 100000;
+                    const current = likesState.currentTotalLikes || 0;
+                    const targetLikes = (Math.floor(current / threshold) + 1) * threshold;
+                    remainingLikes = Math.max(0, targetLikes - current);
+                }
+            }
+
+            const formatNum = (n) => n.toString().padStart(2, '0');
+
+            return (
+                <div className="group h-screen w-screen flex flex-col relative overflow-hidden bg-transparent border-2 border-transparent hover:border-white/50 transition-colors duration-300" style={{ fontFamily: fontFam }}>
+                    <div className="absolute top-0 left-0 w-full h-10 bg-white flex justify-between items-center px-4 z-50 border-b border-white drag-region shadow-md opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div className="flex items-center gap-2"><i className="fa-solid fa-hourglass-start text-indigo-600"></i><span className="text-slate-800 text-xs font-bold tracking-widest uppercase">Окно: Стата</span></div>
+                        <button onClick={() => ipcRenderer.send('close-uptime-window')} className="no-drag w-7 h-7 flex items-center justify-center rounded-md bg-rose-500 text-white shadow-[0_0_10px_rgba(244,63,94,0.6)] hover:bg-rose-600 transition"><i className="fa-solid fa-xmark"></i></button>
+                    </div>
+
+                    <div className="flex-1 w-full relative mt-10 overflow-hidden z-10 pointer-events-none flex flex-col items-center justify-center">
+                        <div className="flex flex-col items-center justify-center gap-10 w-full no-drag" style={{ transform: `scale(${scale})`, transformOrigin: 'center center', width: '1200px', height: '800px' }}>
+                            
+                            {/* Блок Таймера Стрима */}
+                            <div className="flex flex-col items-center">
+                                <div className="font-black uppercase leading-none tracking-tight mb-2 text-center" style={{ color: colorStr, textShadow: glowStr, fontSize: '7rem' }}>
+                                    УЖЕ СИЖУ:
+                                </div>
+                                <div className="font-black tabular-nums leading-none tracking-tight" style={{ color: colorStr, textShadow: glowStr, fontSize: '12rem' }}>
+                                    {formatNum(elapsed.h)}:{formatNum(elapsed.m)}:{formatNum(elapsed.s)}
+                                </div>
+                            </div>
+
+                            {/* Блок Оставшихся Лайков */}
+                            {rouletteId && (
+                                <div className="flex flex-col items-center w-full mt-6">
+                                    <div className="font-black uppercase leading-none tracking-tight mb-2 text-center" style={{ color: colorStr, textShadow: glowStr, fontSize: '7rem' }}>
+                                        ДО РУЛЕТКИ:
+                                    </div>
+                                    <div className="flex items-center justify-center gap-6">
+                                        <span className="font-black tabular-nums leading-none" style={{ color: colorStr, textShadow: glowStr, fontSize: '12rem' }}>
+                                            {remainingLikes.toLocaleString()}
+                                        </span>
+                                        <i className="fa-solid fa-heart text-rose-500 animate-pulse" style={{ fontSize: '6rem', filter: `drop-shadow(0 0 20px rgba(244,63,94,0.8))` }}></i>
+                                    </div>
+                                </div>
+                            )}
+
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<UptimeView />);
+    </script>
+</body>
+</html>
